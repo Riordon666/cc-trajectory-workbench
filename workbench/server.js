@@ -261,7 +261,10 @@ const CROSS_TASK_MEMORY_PATTERNS = [
 ];
 
 function sanitizeCrossTaskMemoryText(text) {
-  return String(text || '')
+  const value = String(text || '');
+  // 无命中时原样返回，保留原始行尾（\r\n），保证 tool_result 与 claude-history.jsonl 完全一致。
+  if (!CROSS_TASK_MEMORY_PATTERNS.some((pattern) => pattern.test(value))) return value;
+  return value
     .split(/\r?\n/)
     .filter((line) => !CROSS_TASK_MEMORY_PATTERNS.some((pattern) => pattern.test(line)))
     .join('\n');
@@ -917,8 +920,10 @@ function convertSession(id, options = {}) {
     const streamedUserRecord = streamedUserContents[i] || null;
 
     // ── User 行 ────────────────────────────────────────
+    // https-intercepts.json 只用于第一轮 user 的前置 system reminder/context；
+    // 其余轮次一律以 claude-history.jsonl 为准，避免代理侧内容覆盖掉本轮 tool_result。
     const userContent = buildSOPContent(round, 'user', {
-      proxyUserContent: proxyRecord?.userContentBlocks || streamedUserRecord?.content,
+      proxyUserContent: i === 0 ? (proxyRecord?.userContentBlocks || streamedUserRecord?.content) : undefined,
     });
     trajectoryLines.push({
       role: 'user',
