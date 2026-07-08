@@ -1,0 +1,15 @@
+{
+  "name": "cline-api-proxy",
+  "version": "3.1.0",
+  "description": "MITM 代理：拦截 Cline 与 API 供应商之间的请求/响应，并与 Cline 本地历史对比验证",
+  "scripts": {
+    "setup": "node setup-https-proxy.js",
+    "proxy": "node forward-proxy.js",
+    "verify": "node verify.js",
+    "workbench": "node workbench/server.js"
+  },
+  "dependencies": {
+    "node-pty": "^1.1.0",
+    "ws": "^8.21.0"
+  }
+}

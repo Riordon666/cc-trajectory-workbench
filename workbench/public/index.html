@@ -1,0 +1,264 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Claude Code Trajectory Workbench</title>
+    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  </head>
+  <body>
+    <div id="particleLayer"></div>
+
+    <header class="topbar">
+      <div class="topbar-bg"></div>
+      <div class="topbar-content">
+        <div>
+          <h1>Claude Code Trajectory Workbench <span class="version-badge">v3.1 release</span></h1>
+          <p>工作区 A 采集验证，工作区 B 转换为 SOP 交付 JSONL。</p>
+        </div>
+        <div class="topbar-actions">
+          <div class="theme-wrapper">
+            <button id="themeBtn" class="theme-btn" title="主题设置">🎨</button>
+            <div class="theme-popover hidden" id="themePopover">
+              <div class="theme-section">
+                <div class="theme-label">壁纸</div>
+                <div class="wp-current" id="wpCurrentName"></div>
+                <input type="file" id="wallpaperFileInput" accept="image/*" style="display:none">
+                <button id="pickWallpaperBtn" class="theme-reset">📂 选择图片...</button>
+                <div class="wp-hint" id="wpHint">壁纸路径：加载中...</div>
+              </div>
+              <div class="theme-section">
+                <div class="theme-label">卡片透明度 <span id="opacityVal">90%</span></div>
+                <input type="range" id="panelOpacity" min="60" max="100" value="90" step="1">
+              </div>
+              <div class="theme-section">
+                <div class="theme-label">壁纸透明度 <span id="wallpaperOpacityVal">100%</span></div>
+                <input type="range" id="wallpaperOpacity" min="10" max="100" value="100" step="1">
+              </div>
+              <div class="theme-section">
+                <div class="theme-label">壁纸亮度 <span id="brightnessVal">100%</span></div>
+                <input type="range" id="wallpaperBrightness" min="30" max="150" value="100" step="1">
+              </div>
+              <div class="theme-section">
+                <div class="theme-label">壁纸模糊 <span id="blurVal">0px</span></div>
+                <input type="range" id="wallpaperBlur" min="0" max="20" value="0" step="1">
+              </div>
+              <button id="themeReset" class="theme-reset">恢复默认</button>
+            </div>
+          </div>
+          <div class="status-pill" id="proxyStatus">Proxy: unknown</div>
+          <button id="shutdownWorkbench" class="shutdown-btn" title="停止代理并退出后台服务">关闭工作台</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar">
+        <div class="portrait-wrap">
+          <img id="characterPortrait" class="character-portrait" src="/pic/DoremsangD-5.png" alt="character">
+          <div class="portrait-banner" style="background-image:url('/pic/3rdcountdown-1.png')"></div>
+        </div>
+        <section class="panel">
+          <h2>Session</h2>
+          <label>当前 Session</label>
+          <select id="sessionSelect"></select>
+          <div class="row" style="margin-top:3px">
+            <input id="sessionName" placeholder="新 session 名称">
+            <button id="createSession"><span class="btn-icon">✎</span>新建</button>
+          </div>
+          <div class="actions compact session-actions">
+            <button id="renameSession"><span class="btn-icon">✎</span>重命名</button>
+            <button id="deleteSession"><span class="btn-icon">×</span>删除</button>
+            <button id="openSessionDir"><span class="btn-icon">▣</span>打开目录</button>
+            <button id="importSession" class="import-btn"><span class="btn-icon">⇩</span>从已有 Session 导入</button>
+          </div>
+          <div class="file-list" id="sessionFiles"></div>
+          <div class="session-summary" id="sessionSummary"></div>
+        </section>
+
+        <section class="panel">
+          <h2>日志</h2>
+          <pre class="logs" id="logs"></pre>
+        </section>
+      </aside>
+
+      <section class="content">
+        <nav class="tabs">
+          <button class="tab active" data-tab="workspaceA">工作区 A：采集验证</button>
+          <button class="tab" data-tab="workspaceB">工作区 B：SOP 转换</button>
+          <button class="tab" data-tab="workspaceC">工作区 C：终端</button>
+        </nav>
+
+        <section id="workspaceA" class="tab-panel active">
+          <div class="grid two">
+            <section class="panel">
+              <h2>代理配置 <span class="hint inline" id="certHint"></span></h2>
+              <div class="proxy-layout">
+                <div class="proxy-inputs">
+                  <label>代理端口<input id="proxyPort" type="number" value="8888" class="input-sm" style="width:60%"></label>
+                  <label>TARGET_HOST<input id="targetHost" placeholder="留空则拦截全部" class="input-sm" style="width:60%"></label>
+                </div>
+                <div class="proxy-actions">
+                  <button id="startProxy" class="primary proxy-btn-tall"><span class="btn-icon">▶</span>启动代理</button>
+                  <button id="stopProxy" class="proxy-btn-tall disabled"><span class="btn-icon">■</span>停止代理</button>
+                </div>
+              </div>
+              <div class="proxy-copy-row">
+                <span class="proxy-cmd-group shell-bash"><button id="copyBashCommand" class="btn-sm"><span class="btn-icon">▶</span>在 Git Bash 终端启动</button><button id="copyBashOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
+                <span class="proxy-cmd-group shell-ps"><button id="copyPSCommand" class="btn-sm"><span class="btn-icon">▶</span>在 PowerShell 终端启动</button><button id="copyPSOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
+                <span class="proxy-cmd-group shell-cmd"><button id="copyCMDCommand" class="btn-sm"><span class="btn-icon">▶</span>在 CMD 终端启动</button><button id="copyCMDOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
+              </div>
+            </section>
+
+            <section class="panel">
+              <h2>Session 数据管理</h2>
+              <p class="hint">
+                ⌕ 从 Claude Code 历史导入 —— 扫描并导入 Claude Code 本地记录<br>
+                ↺ 清除工作台显示 —— 重置界面，不删除 Session 文件
+              </p>
+              <div class="metrics" id="dataStatusMetrics"></div>
+              <div class="actions">
+                <button id="scanHistories" class="primary"><span class="btn-icon">⌕</span>从 Claude Code 历史导入</button>
+                <button id="clearHistory" class="btn-danger-light"><span class="btn-icon">✕</span>历史导入错了？点我清除历史文件</button>
+                <button id="clearSession" class="btn-danger-light"><span class="btn-icon">↺</span>清除工作台显示</button>
+              </div>
+            </section>
+          </div>
+
+          <section class="panel">
+            <div class="panel-head">
+              <h2>抓包数据</h2>
+              <div class="actions compact">
+                <button id="loadIntercepts" class="primary"><span class="btn-icon">↻</span>刷新抓包</button>
+                <button id="runVerify" class="primary"><span class="btn-icon">✓</span>运行验证</button>
+              </div>
+            </div>
+            <div class="metrics" id="captureMetrics"></div>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th data-sort="seqIndex" class="sortable">#</th>
+                    <th data-sort="status" class="sortable">Status</th>
+                    <th data-sort="model" class="sortable">模型</th>
+                    <th data-sort="path" class="sortable">路径</th>
+                    <th data-sort="duration" class="sortable">耗时</th>
+                    <th>Tokens</th>
+                    <th>Tools</th>
+                    <th data-sort="reasoningLength" class="sortable">Thinking</th>
+                    <th>预览</th>
+                  </tr>
+                </thead>
+                <tbody id="interceptsTable"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>验证结果</h2>
+            <div class="metrics" id="verifyMetrics"></div>
+            <div class="verify-table" id="verifyTable"></div>
+            <pre class="result" id="verifyResult"></pre>
+          </section>
+        </section>
+
+        <section id="workspaceB" class="tab-panel">
+          <section class="panel">
+            <h2>交付元数据</h2>
+            <div class="form-grid">
+              <label>Instance ID（实例ID）<input id="instanceId" placeholder="留空自动生成"></label>
+              <label>Task ID（任务ID）<input id="taskId" placeholder="留空自动生成"></label>
+              <label>Model（模型）
+                <select id="model">
+                  <option value="">留空自动映射</option>
+                  <option value="claude-opus-4-6">claude-opus-4-6</option>
+                  <option value="claude-opus-4-8">claude-opus-4-8</option>
+                </select>
+              </label>
+              <label>Language（编程语言）<input id="language" placeholder="留空自动检测"></label>
+              <label>Repo（代码仓库）<input id="repo" placeholder="必填，例如 https://github.com/owner/repo"></label>
+              <label>Base Commit（基准提交） <span style="margin-left:24px;font-size:11px;color:var(--muted)">在对应仓库目录命令行中执行：<code id="baseCommitCmd" style="display:inline-block;background:#f0edf2;border:1px solid #d8d0dc;border-radius:4px;padding:2px 8px;font-family:Consolas,monospace;font-size:11px;color:#5a5a6a">git rev-parse HEAD</code> <button id="copyBaseCommitCmd" class="btn-sm" style="padding:1px 6px;font-size:10px"><span class="btn-icon">⧉</span>复制</button></span> <input id="baseCommit" placeholder="必填，例如 abc1234"></label>
+            </div>
+            <label>Problem Statement（问题描述）<textarea id="problemStatement" rows="4" placeholder="必填，描述要解决的 SWE 任务"></textarea></label>
+            <label>Summary CoT（思维链摘要）<textarea id="summaryCot" rows="4" placeholder="留空自动生成草稿，可再人工修订"></textarea></label>
+            <div class="actions">
+              <button id="convert" class="primary"><span class="btn-icon">✦</span>生成 SOP JSONL + 质检</button>
+              <button id="loadTrajectory"><span class="btn-icon">◉</span>查看 trajectory.jsonl</button>
+              <button id="downloadTrajectory"><span class="btn-icon">⇩</span>下载 trajectory.jsonl</button>
+              <button id="downloadInstance"><span class="btn-icon">⇩</span>下载 instance.json</button>
+            </div>
+          </section>
+
+          <section class="panel">
+            <h2>质检报告</h2>
+            <div class="metrics" id="qcMetrics"></div>
+            <div class="qc-list" id="qcDetails"></div>
+            <pre class="result" id="deliveryPreview"></pre>
+          </section>
+        </section>
+
+        <section id="workspaceC" class="tab-panel">
+          <section class="panel" style="flex:1;display:flex;flex-direction:column;min-height:0;gap:8px">
+            <div class="panel-head">
+              <h2>终端</h2>
+              <div class="terminal-cwd-row">
+                <input id="terminalCwd" class="cwd-input" title="工作目录，回车生效" spellcheck="false" placeholder="工作目录，回车生效">
+                <span class="cwd-hint">输入路径回车即切换，设置后永久生效</span>
+                <button id="terminalCwdBrowse" class="btn-sm cwd-browse-btn" title="在资源管理器中打开当前目录">打开目录</button>
+              </div>
+              <div class="actions compact" style="align-items:center;gap:6px">
+                <span class="hint inline" id="terminalShellHint" style="line-height:1"></span>
+                <button data-shell="bash" class="btn-sm shell-btn" title="Git Bash">Git Bash</button>
+                <button data-shell="powershell.exe" class="btn-sm shell-btn" title="PowerShell">PowerShell</button>
+                <button data-shell="cmd.exe" class="btn-sm shell-btn" title="CMD">CMD</button>
+                <button id="terminalReconnect" class="btn-sm" style="display:none;border-color:#c0392b;background:linear-gradient(180deg,#e74c3c,#c0392b);color:#fff"><span class="btn-icon">↻</span>重连</button>
+                <button id="terminalRestart" class="btn-sm" style="border-color:#c0392b;background:linear-gradient(180deg,#e74c3c,#c0392b);color:#fff"><span class="btn-icon">↺</span>重启</button>
+              </div>
+            </div>
+            <div id="terminalContainer" style="flex:1;min-height:300px;border-radius:8px;overflow:hidden"></div>
+          </section>
+        </section>
+      </section>
+    </main>
+
+    <div id="toastContainer"></div>
+    <div id="detailModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-card">
+        <div class="modal-head">
+          <h2 id="modalTitle">抓包详情</h2>
+          <button id="closeModal"><span class="btn-icon">×</span>关闭</button>
+        </div>
+        <div class="modal-body" id="modalBody"></div>
+      </div>
+    </div>
+
+    <div id="newSessionModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-card" style="width:min(420px,90vw)">
+        <div class="modal-head">
+          <h2>新建 Session</h2>
+        </div>
+        <div class="modal-body">
+          <p style="margin:0 0 12px;color:var(--muted)">当前没有 Session，请新建一个。留空则使用时间戳命名。</p>
+          <input id="newSessionName" placeholder="留空使用时间戳" style="margin-bottom:12px">
+          <button id="confirmNewSession" class="primary" style="width:100%">✓ 创建</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="historyPicker" class="modal hidden" aria-hidden="true">
+      <div class="modal-card" style="width:min(600px,94vw)">
+        <div class="modal-head">
+          <h2>选择历史文件</h2>
+          <button id="closeHistoryPicker"><span class="btn-icon">×</span>关闭</button>
+        </div>
+        <div class="modal-body" id="historyPickerBody"></div>
+      </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
