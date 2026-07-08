@@ -14,6 +14,8 @@ const CERT_DIR = path.join(ROOT, 'certs');
 const HOST = '127.0.0.1';
 const PORT = parseInt(process.env.WORKBENCH_PORT || '5177', 10);
 const MAX_JSON_TEXT_BYTES = 450 * 1024 * 1024;
+const MAX_WALLPAPER_BYTES = 25 * 1024 * 1024;
+const WALLPAPER_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif']);
 const SYSTEM_PROMPT_ANCHOR = "You are Claude Code, Anthropic's official CLI for Claude.";
 const MIN_MAIN_SYSTEM_PROMPT_CHARS = 4000;
 
@@ -71,6 +73,24 @@ function formatBytes(value) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${Math.round(n / 1024)} KB`;
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
+}
+
+function safeWallpaperFilename(filename) {
+  const value = String(filename || '').trim();
+  const baseName = path.basename(value);
+  const posixBaseName = path.posix.basename(value);
+  const winBaseName = path.win32.basename(value);
+  if (!value || value !== baseName || value !== posixBaseName || value !== winBaseName) {
+    throw httpError(400, 'Invalid wallpaper filename');
+  }
+  if (value === '.' || value === '..' || /[<>:"/\\|?*\x00-\x1F]/.test(value)) {
+    throw httpError(400, 'Invalid wallpaper filename');
+  }
+  const ext = path.extname(value).toLowerCase();
+  if (!WALLPAPER_EXTENSIONS.has(ext)) {
+    throw httpError(400, 'Unsupported wallpaper file type');
+  }
+  return value;
 }
 
 function httpError(status, message) {
@@ -1210,9 +1230,8 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/wallpapers') {
     const picDir = path.join(PUBLIC_DIR, 'pic');
     if (!fs.existsSync(picDir)) return send(res, 200, { wallpapers: [] });
-    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'];
     const files = fs.readdirSync(picDir)
-      .filter((f) => imageExts.includes(path.extname(f).toLowerCase()))
+      .filter((f) => WALLPAPER_EXTENSIONS.has(path.extname(f).toLowerCase()))
       .map((f) => ({ name: f, path: `/pic/${f}` }));
     return send(res, 200, { wallpapers: files });
   }
@@ -1223,43 +1242,51 @@ async function api(req, res, url) {
     const bufs = [];
     req.on('data', (c) => bufs.push(c));
     req.on('end', () => {
-      const raw = Buffer.concat(bufs);
-      const ct = req.headers['content-type'] || '';
-      const boundary = ct.match(/boundary=(.+)/)?.[1];
-      if (!boundary) return send(res, 400, { error: 'No boundary' });
-      const boundaryBuf = Buffer.from(`--${boundary}`);
-      const endBoundary = Buffer.from(`--${boundary}--`);
-      // 找第一个 boundary 之后到下一个 boundary 之间的内容
-      let start = raw.indexOf(boundaryBuf) + boundaryBuf.length;
-      if (raw.slice(start, start + 2).equals(Buffer.from('\r\n'))) start += 2;
-      const nextBoundary = raw.indexOf(boundaryBuf, start);
-      const part = nextBoundary === -1 ? raw.slice(start) : raw.slice(start, nextBoundary);
-      // 去掉尾部 \r\n
-      let partEnd = part.length;
-      while (partEnd > 0 && (part[partEnd - 1] === 0x0d || part[partEnd - 1] === 0x0a)) partEnd--;
-      const partData = part.slice(0, partEnd);
-      // 找 header 和 body 的分界：\r\n\r\n
-      let headerEnd = -1;
-      for (let i = 0; i < partData.length - 3; i++) {
-        if (partData[i] === 0x0d && partData[i + 1] === 0x0a && partData[i + 2] === 0x0d && partData[i + 3] === 0x0a) {
-          headerEnd = i;
-          break;
+      try {
+        const raw = Buffer.concat(bufs);
+        if (raw.length > MAX_WALLPAPER_BYTES) throw httpError(413, 'Wallpaper file too large');
+        const ct = req.headers['content-type'] || '';
+        const boundary = ct.match(/boundary=(.+)/)?.[1];
+        if (!boundary) throw httpError(400, 'No boundary');
+        const boundaryBuf = Buffer.from(`--${boundary}`);
+        // 找第一个 boundary 之后到下一个 boundary 之间的内容
+        let start = raw.indexOf(boundaryBuf);
+        if (start === -1) throw httpError(400, 'Bad multipart');
+        start += boundaryBuf.length;
+        if (raw.slice(start, start + 2).equals(Buffer.from('\r\n'))) start += 2;
+        const nextBoundary = raw.indexOf(boundaryBuf, start);
+        const part = nextBoundary === -1 ? raw.slice(start) : raw.slice(start, nextBoundary);
+        // 去掉尾部 \r\n
+        let partEnd = part.length;
+        while (partEnd > 0 && (part[partEnd - 1] === 0x0d || part[partEnd - 1] === 0x0a)) partEnd--;
+        const partData = part.slice(0, partEnd);
+        // 找 header 和 body 的分界：\r\n\r\n
+        let headerEnd = -1;
+        for (let i = 0; i < partData.length - 3; i++) {
+          if (partData[i] === 0x0d && partData[i + 1] === 0x0a && partData[i + 2] === 0x0d && partData[i + 3] === 0x0a) {
+            headerEnd = i;
+            break;
+          }
         }
+        if (headerEnd === -1) throw httpError(400, 'Bad multipart');
+        const header = partData.slice(0, headerEnd).toString();
+        const body = partData.slice(headerEnd + 4);
+        // 去掉末尾可能的多余 \r\n
+        let bodyEnd = body.length;
+        while (bodyEnd > 0 && (body[bodyEnd - 1] === 0x0d || body[bodyEnd - 1] === 0x0a)) bodyEnd--;
+        const cleanBody = body.slice(0, bodyEnd);
+        const filenameMatch = header.match(/filename="(.+?)"/);
+        if (!filenameMatch) throw httpError(400, 'No filename');
+        const fname = safeWallpaperFilename(filenameMatch[1]);
+        const picRoot = path.resolve(picDir);
+        const dest = path.resolve(picRoot, fname);
+        if (!dest.startsWith(`${picRoot}${path.sep}`)) throw httpError(400, 'Invalid wallpaper filename');
+        fs.writeFileSync(dest, cleanBody);
+        log(`Wallpaper uploaded: ${fname}`);
+        return send(res, 200, { ok: true, path: `/pic/${encodeURIComponent(fname)}` });
+      } catch (err) {
+        return send(res, err.status || 500, { error: err.message || 'Upload failed' });
       }
-      if (headerEnd === -1) return send(res, 400, { error: 'Bad multipart' });
-      const header = partData.slice(0, headerEnd).toString();
-      const body = partData.slice(headerEnd + 4);
-      // 去掉末尾可能的多余 \r\n
-      let bodyEnd = body.length;
-      while (bodyEnd > 0 && (body[bodyEnd - 1] === 0x0d || body[bodyEnd - 1] === 0x0a)) bodyEnd--;
-      const cleanBody = body.slice(0, bodyEnd);
-      const filenameMatch = header.match(/filename="(.+?)"/);
-      if (!filenameMatch) return send(res, 400, { error: 'No filename' });
-      const fname = filenameMatch[1];
-      const dest = path.join(picDir, fname);
-      fs.writeFileSync(dest, cleanBody);
-      log(`Wallpaper uploaded: ${fname}`);
-      return send(res, 200, { ok: true, path: `/pic/${fname}` });
     });
     return;
   }
