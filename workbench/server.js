@@ -1459,12 +1459,22 @@ async function api(req, res, url) {
 
 // ── Terminal / Shell (node-pty) ─────────────────────────
 
+function findGitBash() {
+  const candidates = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'D:\\Git\\bin\\bash.exe',
+    'C:\\Git\\bin\\bash.exe',
+  ];
+  for (const p of candidates) {
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
+}
+
 function resolveShell(shellCmd) {
   if (!shellCmd) {
     if (process.platform === 'win32') {
-      const gitBash = 'C:\\Program Files\\Git\\bin\\bash.exe';
-      if (fs.existsSync(gitBash)) return gitBash;
-      return 'powershell.exe';
+      return findGitBash() || 'powershell.exe';
     }
     return process.env.SHELL || 'bash';
   }
@@ -1472,10 +1482,7 @@ function resolveShell(shellCmd) {
   // User-requested shell — resolve shorthand names to full paths on Windows
   if (process.platform === 'win32') {
     if (shellCmd === 'bash') {
-      const gitBash = 'C:\\Program Files\\Git\\bin\\bash.exe';
-      if (fs.existsSync(gitBash)) return gitBash;
-      // Fall back to searching PATH
-      return 'bash.exe';
+      return findGitBash() || 'bash.exe';
     }
     if (shellCmd === 'powershell' || shellCmd === 'pwsh') {
       const pwsh7 = 'C:\\Program Files\\PowerShell\\7\\pwsh.exe';
