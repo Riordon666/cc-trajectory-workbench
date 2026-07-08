@@ -1,6 +1,12 @@
-# Claude Code Trajectory Workbench v3.1 release
+<h1 align="center">Claude Code Trajectory Workbench <sup><small>v3.1 release</small></sup></h1>
 
-MITM 正向代理 + Web 工作台 + 内置终端，用于采集 Claude Code 编程轨迹数据，验证抓包完整性，并输出符合 SOP 规范的交付文件。
+<p align="center">
+  <img src="https://img.shields.io/badge/Node.js-v18%2B-brightgreen?logo=nodedotjs" alt="Node.js">
+  <img src="https://img.shields.io/badge/Platform-Windows%20|%20macOS%20|%20Linux-lightgrey?logo=windows" alt="Platform">
+  <img src="https://img.shields.io/badge/License-MIT-blue" alt="License">
+</p>
+
+<p align="center">MITM 正向代理 + Web 工作台 + 内置终端，用于采集 Claude Code 编程轨迹数据，验证抓包完整性，并输出符合 SOP 规范的交付文件。</p>
 
 ## 环境要求
 
@@ -32,6 +38,16 @@ npm run workbench
 ```
 
 详细步骤见 `本地工作台作业流程.md`。
+
+## 界面预览
+
+| 工作台全景 | 抓包数据 |
+|---|---|
+| [![工作台全景](docs/screenshots/overview.png)](docs/screenshots/overview.png) | [![抓包数据](docs/screenshots/intercepts.png)](docs/screenshots/intercepts.png) |
+
+| 内置终端 | 验证结果 | 质检报告 |
+|---|---|---|
+| [![内置终端](docs/screenshots/terminal.png)](docs/screenshots/terminal.png) | [![验证结果](docs/screenshots/verification.png)](docs/screenshots/verification.png) | [![质检报告](docs/screenshots/qc-report.png)](docs/screenshots/qc-report.png) |
 
 ## 文件结构
 
