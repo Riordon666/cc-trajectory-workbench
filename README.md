@@ -1,7 +1,6 @@
+<h1 align="center">Claude Code Trajectory Workbench <sup><small>v0.4</small></sup></h1>
 <!-- 可爱的装饰线 -->
 <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=200&section=header&text=Claude%20Code%20Trajectory%20Workbench&fontSize=40&fontAlignY=35&animation=twinkling&fontColor=fff" />
-
-<h1 align="center">Claude Code Trajectory Workbench <sup><small>v3.1 release</small></sup></h1>
 
 <p align="center">
   <img src="https://img.shields.io/badge/Node.js-v18%2B-brightgreen?logo=nodedotjs" alt="Node.js">
@@ -9,7 +8,7 @@
   <img src="https://img.shields.io/badge/License-MIT-blue" alt="License">
 </p>
 
-<p align="center">MITM 正向代理 + Web 工作台 + 内置终端，用于采集 Claude Code 编程轨迹数据，验证抓包完整性，并输出抓包与分析文件。</p>
+<p align="center">MITM 正向代理 + Web 工作台 + 内置终端 + 轨迹回放调试器，用于采集 Claude Code 编程轨迹数据，验证抓包完整性，并输出符合 SOP 规范的交付文件。</p>
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
@@ -46,10 +45,19 @@ npm run workbench -- 5180
 
 ```
 新建 Session → 启动代理 → 一键启动 Claude Code（内置终端）→ 编程
-→ 停止代理 → 导入数据 → 验证 → SOP 转换 → 质检 → 一键打包下载
+→ 停止代理 → 导入数据 → 验证 → 轨迹回放调试 → SOP 转换 → 质检 → 一键打包下载
 ```
 
 详细步骤见 `本地工作台作业流程.md`。
+
+## 功能概览
+
+| 工作区 | 能力 |
+|---|---|
+| 工作区 A：采集验证 | 启停 MITM 代理、导入 Claude Code 历史、查看抓包并运行逐轮验证 |
+| 工作区 B：SOP 转换 | 填写交付元数据，生成 `trajectory.jsonl` / `instance.json` 并自动质检 |
+| 工作区 C：终端 | 在浏览器内使用 Git Bash / PowerShell / CMD，一键带代理启动 Claude Code |
+| 工作区 D：轨迹回放 | 按轮次对齐 Claude History、代理请求、验证结果和 SOP trajectory，定位额外请求、失败项和注意项 |
 
 <img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 

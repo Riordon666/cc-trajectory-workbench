@@ -846,6 +846,237 @@ function verifySession(id) {
   return result;
 }
 
+function clipReplayText(value, max = 20000) {
+  const text = typeof value === 'string' ? value : textFromContent(value);
+  if (text.length <= max) return text;
+  return `${text.slice(0, max)}\n\n... truncated ${text.length - max} chars`;
+}
+
+function readTrajectoryJsonl(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+  return fs.readFileSync(filePath, 'utf8')
+    .split(/\r?\n/)
+    .map((raw, index) => ({ raw, lineNumber: index + 1 }))
+    .filter((line) => line.raw.trim())
+    .map((line) => {
+      try {
+        return { ...line, data: JSON.parse(line.raw), parseError: null };
+      } catch (err) {
+        return { ...line, data: null, parseError: err.message };
+      }
+    });
+}
+
+function replayStatusFromDiagnostics(diagnostics) {
+  if (diagnostics.some((d) => d.level === 'error')) return 'error';
+  if (diagnostics.some((d) => d.level === 'warn')) return 'warn';
+  return 'ok';
+}
+
+function addReplayDiagnostic(diagnostics, level, code, message) {
+  diagnostics.push({ level, code, message });
+}
+
+function diagnoseReplayTurn({ round, proxyRecord, detail, hasTrajectory, trajectoryUser, trajectoryAssistant }) {
+  const diagnostics = [];
+  if (!round) {
+    addReplayDiagnostic(diagnostics, 'error', 'missing_history_round', '缺少 Claude History 轮次');
+  }
+
+  if (!detail) {
+    addReplayDiagnostic(diagnostics, 'warn', 'missing_verification', '没有找到这一轮的验证对齐结果');
+  } else if (!detail.checks?.matched) {
+    addReplayDiagnostic(diagnostics, 'error', 'unmatched_proxy', '代理请求没有匹配到 Claude History 轮次');
+  } else {
+    const checks = detail.checks || {};
+    if (checks.userContentMatch === false) addReplayDiagnostic(diagnostics, 'info', 'user_mismatch', 'User 内容前缀不一致（通常来自 system reminder / 注入上下文差异）');
+    if (checks.responseMatch === false) addReplayDiagnostic(diagnostics, 'error', 'response_mismatch', 'Assistant 回复与代理响应不一致');
+    if (checks.modelMatch === false) addReplayDiagnostic(diagnostics, 'error', 'model_mismatch', '模型字段不一致');
+    if (checks.responseToolMatch === false) addReplayDiagnostic(diagnostics, 'error', 'tool_mismatch', 'Tool calls 与 History 记录不一致');
+  }
+
+  if (!proxyRecord && detail?.checks?.matched) {
+    addReplayDiagnostic(diagnostics, 'error', 'missing_proxy_record', '验证结果引用的代理记录不存在');
+  }
+
+  if (round?.thinkingText && !round.signature) {
+    addReplayDiagnostic(diagnostics, 'warn', 'missing_signature', 'thinking 块缺少 signature');
+  }
+  if (proxyRecord?.responseReasoning && !round?.thinkingText) {
+    addReplayDiagnostic(diagnostics, 'warn', 'reasoning_not_in_history', '代理侧有 reasoning，但 History 侧没有 thinking');
+  }
+
+  if (hasTrajectory && (!trajectoryUser || !trajectoryAssistant)) {
+    addReplayDiagnostic(diagnostics, 'warn', 'missing_trajectory_line', 'trajectory.jsonl 中缺少对应的 user/assistant 行');
+  } else {
+    if (trajectoryUser?.parseError) addReplayDiagnostic(diagnostics, 'error', 'bad_user_jsonl', `User 行 JSON 解析失败: ${trajectoryUser.parseError}`);
+    if (trajectoryAssistant?.parseError) addReplayDiagnostic(diagnostics, 'error', 'bad_assistant_jsonl', `Assistant 行 JSON 解析失败: ${trajectoryAssistant.parseError}`);
+  }
+
+  if (!diagnostics.length) {
+    addReplayDiagnostic(diagnostics, 'info', 'ok', '这一轮验证通过，结构完整');
+  }
+  return { status: replayStatusFromDiagnostics(diagnostics), diagnostics };
+}
+
+function summarizeProxyRecord(record) {
+  if (!record) return null;
+  return {
+    seqIndex: record.seqIndex,
+    timestamp: record.timestamp,
+    method: record.method,
+    path: record.path,
+    url: record.url,
+    status: record.status,
+    duration: record.duration,
+    requestModel: record.requestModel,
+    responseModel: record.responseModel,
+    messageCount: record.messageCount,
+    hasSystemPrompt: record.hasSystemPrompt,
+    systemPrompt: clipReplayText(record.systemPrompt, 6000),
+    userContent: clipReplayText(record.userContent, 12000),
+    responseContent: clipReplayText(record.responseContent, 20000),
+    responseReasoning: clipReplayText(record.responseReasoning, 12000),
+    responseToolCalls: record.responseToolCalls,
+    usage: record.usage,
+  };
+}
+
+function isReplaySideRequest(record) {
+  const userText = String(record?.userContent || '');
+  const responseText = String(record?.responseContent || '');
+  const patterns = [
+    /The user stepped away and is coming back/i,
+    /Recap in under \d+ words/i,
+    /conversation summary/i,
+    /summari[sz]e the conversation/i,
+    /generate a concise/i,
+  ];
+  return patterns.some((pattern) => pattern.test(userText) || pattern.test(responseText));
+}
+
+function buildReplayTimeline(id) {
+  const dir = sessionDir(id);
+  if (!fs.existsSync(dir)) throw httpError(404, 'Session not found');
+
+  const interceptFile = path.join(dir, 'https-intercepts.json');
+  const historyFile = path.join(dir, 'claude-history.jsonl');
+  const verificationFile = path.join(dir, 'verification-result.json');
+  const trajectoryFile = path.join(dir, 'trajectory.jsonl');
+  const hasTrajectory = fs.existsSync(trajectoryFile);
+
+  const intercepts = fs.existsSync(interceptFile)
+    ? parseIntercepts(interceptFile)
+    : { records: [], stats: null, skipped: false };
+  const rounds = fs.existsSync(historyFile) ? parseClaudeHistory(historyFile) : [];
+  const verification = fs.existsSync(verificationFile)
+    ? readJson(verificationFile)
+    : (intercepts.records.length && rounds.length
+      ? { timestamp: null, summary: null, details: alignRecords(intercepts.records, rounds) }
+      : { timestamp: null, summary: null, details: [] });
+  const trajectoryLines = readTrajectoryJsonl(trajectoryFile);
+
+  const proxyByIndex = new Map(intercepts.records.map((record) => [record.seqIndex, record]));
+  const detailByClientRound = new Map((verification.details || [])
+    .filter((detail) => detail.clientRound !== null && detail.clientRound !== undefined)
+    .map((detail) => [detail.clientRound, detail]));
+  const matchedProxyIndexes = new Set();
+  const turns = [];
+  const events = [];
+
+  for (const round of rounds) {
+    const detail = detailByClientRound.get(round.index) || null;
+    const proxyRecord = detail ? proxyByIndex.get(detail.proxyIndex) || null : null;
+    if (proxyRecord) matchedProxyIndexes.add(proxyRecord.seqIndex);
+
+    const trajectoryUser = trajectoryLines[round.index * 2] || null;
+    const trajectoryAssistant = trajectoryLines[round.index * 2 + 1] || null;
+    const diagnosis = diagnoseReplayTurn({ round, proxyRecord, detail, hasTrajectory, trajectoryUser, trajectoryAssistant });
+    const turn = {
+      turnIndex: round.index,
+      status: diagnosis.status,
+      diagnostics: diagnosis.diagnostics,
+      user: {
+        content: clipReplayText(round.userContent, 16000),
+        toolResults: (round.toolResults || []).map((toolResult) => ({
+          tool_use_id: toolResult.tool_use_id,
+          content: clipReplayText(toolResult.content, 12000),
+        })),
+      },
+      assistant: {
+        content: clipReplayText(round.assistantContent, 20000),
+        thinking: clipReplayText(round.thinkingText, 16000),
+        signature: round.signature || '',
+        toolUses: round.toolUses || [],
+        modelId: round.modelId || '',
+        provider: round.provider || '',
+        usage: round.usage || null,
+        ts: round.ts || null,
+        rawUuids: round.rawUuids || [],
+      },
+      proxy: summarizeProxyRecord(proxyRecord),
+      verification: detail,
+      trajectory: {
+        userLine: trajectoryUser ? { lineNumber: trajectoryUser.lineNumber, data: trajectoryUser.data, parseError: trajectoryUser.parseError } : null,
+        assistantLine: trajectoryAssistant ? { lineNumber: trajectoryAssistant.lineNumber, data: trajectoryAssistant.data, parseError: trajectoryAssistant.parseError } : null,
+      },
+    };
+    turns.push(turn);
+    events.push({ type: 'user_turn', turnIndex: round.index, status: turn.status, timestamp: round.ts || proxyRecord?.timestamp || null });
+    if (proxyRecord) events.push({ type: 'api_request', turnIndex: round.index, proxyIndex: proxyRecord.seqIndex, status: turn.status, timestamp: proxyRecord.timestamp });
+    events.push({ type: 'assistant_turn', turnIndex: round.index, status: turn.status, timestamp: round.ts || proxyRecord?.timestamp || null });
+    if (detail) events.push({ type: 'verify_check', turnIndex: round.index, proxyIndex: detail.proxyIndex, status: turn.status, confidence: detail.confidence });
+  }
+
+  const proxyOnly = intercepts.records
+    .filter((record) => !matchedProxyIndexes.has(record.seqIndex))
+    .map((record) => {
+      const sideRequest = isReplaySideRequest(record);
+      return {
+        status: 'warn',
+        diagnostics: [{
+          level: 'warn',
+          code: sideRequest ? 'side_request_without_history' : 'extra_proxy_without_history',
+          message: sideRequest
+            ? '看起来是 Claude Code 自动摘要/旁路请求，不参与 History 轮次匹配'
+            : '额外代理请求没有对应的 Claude History 轮次，请确认是否为标题生成、重试或上下文请求',
+        }],
+        proxy: summarizeProxyRecord(record),
+      };
+    });
+
+  const problemTurns = turns.filter((turn) => turn.status !== 'ok').length;
+  const extraProxyWarnings = proxyOnly.filter((item) => item.status === 'warn').length;
+  const proxyOnlyErrors = proxyOnly.filter((item) => item.status === 'error').length;
+  return {
+    sessionId: id,
+    generatedAt: new Date().toISOString(),
+    files: {
+      intercepts: fs.existsSync(interceptFile),
+      history: fs.existsSync(historyFile),
+      verification: fs.existsSync(verificationFile),
+      trajectory: hasTrajectory,
+    },
+    stats: intercepts.stats || {},
+    verificationSummary: verification.summary || null,
+    summary: {
+      turns: turns.length,
+      proxyRequests: intercepts.records.length,
+      matchedTurns: turns.filter((turn) => turn.verification?.checks?.matched).length,
+      problemTurns,
+      extraProxyWarnings,
+      attentionItems: problemTurns + extraProxyWarnings + proxyOnlyErrors,
+      trajectoryLines: trajectoryLines.length,
+      okTurns: turns.filter((turn) => turn.status === 'ok').length,
+      warnTurns: turns.filter((turn) => turn.status === 'warn').length,
+      errorTurns: turns.filter((turn) => turn.status === 'error').length + proxyOnlyErrors,
+    },
+    turns,
+    proxyOnly,
+    events,
+  };
+}
+
 function detectLanguage(rounds) {
   const extMap = {
     '.py': 'python', '.js': 'javascript', '.ts': 'typescript', '.tsx': 'typescript',
@@ -1393,6 +1624,7 @@ async function api(req, res, url) {
       });
     }
     if (req.method === 'POST' && action === 'verify') return send(res, 200, verifySession(id));
+    if (req.method === 'GET' && action === 'replay') return send(res, 200, buildReplayTimeline(id));
     if (req.method === 'POST' && action === 'convert') {
       const body = await parseBody(req);
       return send(res, 200, convertSession(id, body));
