@@ -9,6 +9,7 @@
     "workbench": "node workbench/server.js"
   },
   "dependencies": {
+    "adm-zip": "^0.5.18",
     "node-pty": "^1.1.0",
     "ws": "^8.21.0"
   }

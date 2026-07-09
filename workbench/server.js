@@ -1,8 +1,10 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const net = require('net');
 const { spawn } = require('child_process');
 const crypto = require('crypto');
+const AdmZip = require('adm-zip');
 const { StringDecoder } = require('string_decoder');
 const { WebSocketServer } = require('ws');
 const pty = require('node-pty');
@@ -12,8 +14,14 @@ const PUBLIC_DIR = path.join(__dirname, 'public');
 const SESSIONS_DIR = path.join(ROOT, 'sessions');
 const CERT_DIR = path.join(ROOT, 'certs');
 const HOST = '127.0.0.1';
-const PORT = parseInt(process.env.WORKBENCH_PORT || '5177', 10);
+const PORT = (() => {
+  const portArg = process.argv.find((a, i) => a === '--port' && process.argv[i + 1]);
+  const numArg = process.argv.find((a) => /^\d{4,5}$/.test(a));
+  return parseInt(portArg || numArg || process.env.WORKBENCH_PORT || '5177', 10);
+})();
 const MAX_JSON_TEXT_BYTES = 450 * 1024 * 1024;
+const MAX_WALLPAPER_BYTES = 25 * 1024 * 1024;
+const WALLPAPER_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif']);
 const SYSTEM_PROMPT_ANCHOR = "You are Claude Code, Anthropic's official CLI for Claude.";
 const MIN_MAIN_SYSTEM_PROMPT_CHARS = 4000;
 
@@ -34,7 +42,7 @@ function ensureDir(dir) {
 }
 
 function safeSessionId(id) {
-  if (!/^[a-zA-Z0-9._-]+$/.test(id || '')) throw httpError(400, 'Invalid session id');
+  if (!/^[a-zA-Z0-9._-]+$/.test(id || '')) throw httpError(400, '无效的 Session ID');
   return id;
 }
 
@@ -46,7 +54,7 @@ function assertInsideSessions(dir) {
   const resolved = path.resolve(dir);
   const root = path.resolve(SESSIONS_DIR);
   if (resolved !== root && !resolved.startsWith(`${root}${path.sep}`)) {
-    throw httpError(400, 'Path is outside sessions directory');
+    throw httpError(400, '路径超出 Session 目录范围');
   }
   return resolved;
 }
@@ -73,6 +81,24 @@ function formatBytes(value) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
+function safeWallpaperFilename(filename) {
+  const value = String(filename || '').trim();
+  const baseName = path.basename(value);
+  const posixBaseName = path.posix.basename(value);
+  const winBaseName = path.win32.basename(value);
+  if (!value || value !== baseName || value !== posixBaseName || value !== winBaseName) {
+    throw httpError(400, '无效的壁纸文件名');
+  }
+  if (value === '.' || value === '..' || /[<>:"/\\|?*\x00-\x1F]/.test(value)) {
+    throw httpError(400, '无效的壁纸文件名');
+  }
+  const ext = path.extname(value).toLowerCase();
+  if (!WALLPAPER_EXTENSIONS.has(ext)) {
+    throw httpError(400, '不支持的壁纸文件格式');
+  }
+  return value;
+}
+
 function httpError(status, message) {
   const err = new Error(message);
   err.status = status;
@@ -84,14 +110,14 @@ function parseBody(req) {
     let raw = '';
     req.on('data', (chunk) => {
       raw += chunk;
-      if (raw.length > 20 * 1024 * 1024) reject(httpError(413, 'Request body too large'));
+      if (raw.length > 20 * 1024 * 1024) reject(httpError(413, '请求体过大'));
     });
     req.on('end', () => {
       if (!raw) return resolve({});
       try {
         resolve(JSON.parse(raw));
       } catch {
-        reject(httpError(400, 'Invalid JSON body'));
+        reject(httpError(400, '无效的 JSON 请求体'));
       }
     });
   });
@@ -110,7 +136,7 @@ function serveStatic(res, pathname) {
   const cleanPath = pathname === '/' ? '/index.html' : decodeURIComponent(pathname);
   const file = path.resolve(PUBLIC_DIR, cleanPath.replace(/^\/+/, ''));
   if (!file.startsWith(PUBLIC_DIR) || !fs.existsSync(file) || fs.statSync(file).isDirectory()) {
-    return send(res, 404, 'Not found');
+    return send(res, 404, '文件不存在');
   }
   const ext = path.extname(file).toLowerCase();
   const types = {
@@ -147,13 +173,13 @@ function listSessions() {
 
 function renameSession(id, name) {
   const dir = sessionDir(id);
-  if (!fs.existsSync(dir)) throw httpError(404, 'Session not found');
+  if (!fs.existsSync(dir)) throw httpError(404, 'Session 不存在');
   const newName = String(name || id).trim();
   if (!newName || newName === id) return { id, config: { id, name: newName } };
   // 重命名目录
   const newDir = path.join(SESSIONS_DIR, newName);
   assertInsideSessions(newDir);
-  if (fs.existsSync(newDir)) throw httpError(409, 'Session name already exists');
+  if (fs.existsSync(newDir)) throw httpError(409, 'Session 名称已存在');
   fs.renameSync(dir, newDir);
   // 更新 config
   const configPath = path.join(newDir, 'config.json');
@@ -163,16 +189,16 @@ function renameSession(id, name) {
   writeJson(configPath, config);
   // 如果正在代理此 session，更新引用
   if (proxySessionId === id) proxySessionId = newName;
-  log(`Renamed session ${id} → ${newName}`);
+  log(`Session 已重命名 ${id} → ${newName}`);
   return { id: newName, config };
 }
 
 function deleteSession(id) {
-  if (proxySessionId === id && proxyProcess) throw httpError(409, 'Stop proxy before deleting this session');
+  if (proxySessionId === id && proxyProcess) throw httpError(409, '删除前请先停止代理');
   const dir = assertInsideSessions(sessionDir(id));
-  if (!fs.existsSync(dir)) throw httpError(404, 'Session not found');
+  if (!fs.existsSync(dir)) throw httpError(404, 'Session 不存在');
   fs.rmSync(dir, { recursive: true, force: true });
-  log(`Deleted session ${id}`);
+  log(`Session 已删除 ${id}`);
   return { ok: true };
 }
 
@@ -201,12 +227,12 @@ function createSession(name) {
     targetHost: '',
   };
   writeJson(path.join(dir, 'config.json'), config);
-  log(`Created session ${id}`);
+  log(`Session 已创建 ${id}`);
   return { id, path: dir, config };
 }
 
 function copyIntoSession(source, target) {
-  if (!source || !fs.existsSync(source)) throw httpError(400, `File not found: ${source}`);
+  if (!source || !fs.existsSync(source)) throw httpError(400, `文件不存在: ${source}`);
   fs.copyFileSync(source, target);
 }
 
@@ -528,7 +554,7 @@ function parseIntercepts(filePath) {
       raw: {},
       records: [],
       skipped: true,
-      skipReason: `https-intercepts.json is too large to parse safely (${formatBytes(fileSize)}).`,
+      skipReason: `https-intercepts.json 文件过大无法安全解析 (${formatBytes(fileSize)}).`,
       stats: {
         totalInterceptions: 0,
         totalChatRequests: 0,
@@ -595,10 +621,10 @@ function parseIntercepts(filePath) {
 
 function getInterceptDetail(id, seqIndex) {
   const file = path.join(sessionDir(id), 'https-intercepts.json');
-  if (!fs.existsSync(file)) throw httpError(404, 'No intercepts file in session');
+  if (!fs.existsSync(file)) throw httpError(404, 'Session 中没有抓包文件');
   const parsed = parseIntercepts(file);
   const record = parsed.records.find((r) => r.seqIndex === Number(seqIndex));
-  if (!record) throw httpError(404, 'Intercept record not found');
+  if (!record) throw httpError(404, '抓包记录不存在');
   return {
     seqIndex: record.seqIndex,
     timestamp: record.timestamp,
@@ -778,8 +804,8 @@ function verifySession(id) {
   const dir = sessionDir(id);
   const interceptFile = path.join(dir, 'https-intercepts.json');
   const historyFile = path.join(dir, 'claude-history.jsonl');
-  if (!fs.existsSync(interceptFile)) throw httpError(400, 'Session is missing https-intercepts.json');
-  if (!fs.existsSync(historyFile)) throw httpError(400, 'Session is missing claude-history.jsonl');
+  if (!fs.existsSync(interceptFile)) throw httpError(400, 'Session 缺少抓包文件');
+  if (!fs.existsSync(historyFile)) throw httpError(400, 'Session 缺少历史文件');
 
   const intercepts = parseIntercepts(interceptFile);
   const rounds = parseClaudeHistory(historyFile);
@@ -1101,7 +1127,7 @@ function convertSession(id, options = {}) {
   const historyFile = path.join(dir, 'claude-history.jsonl');
   const verificationFile = path.join(dir, 'verification-result.json');
   if (!fs.existsSync(interceptFile) || !fs.existsSync(historyFile)) {
-    throw httpError(400, 'Import intercepts and Claude Code history before conversion');
+    throw httpError(400, '转换前请先导入抓包和历史数据');
   }
   const intercepts = parseIntercepts(interceptFile);
   const rounds = parseClaudeHistory(historyFile);
@@ -1441,9 +1467,8 @@ async function api(req, res, url) {
   if (req.method === 'GET' && url.pathname === '/api/wallpapers') {
     const picDir = path.join(PUBLIC_DIR, 'pic');
     if (!fs.existsSync(picDir)) return send(res, 200, { wallpapers: [] });
-    const imageExts = ['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'];
     const files = fs.readdirSync(picDir)
-      .filter((f) => imageExts.includes(path.extname(f).toLowerCase()))
+      .filter((f) => WALLPAPER_EXTENSIONS.has(path.extname(f).toLowerCase()))
       .map((f) => ({ name: f, path: `/pic/${f}` }));
     return send(res, 200, { wallpapers: files });
   }
@@ -1454,43 +1479,51 @@ async function api(req, res, url) {
     const bufs = [];
     req.on('data', (c) => bufs.push(c));
     req.on('end', () => {
-      const raw = Buffer.concat(bufs);
-      const ct = req.headers['content-type'] || '';
-      const boundary = ct.match(/boundary=(.+)/)?.[1];
-      if (!boundary) return send(res, 400, { error: 'No boundary' });
-      const boundaryBuf = Buffer.from(`--${boundary}`);
-      const endBoundary = Buffer.from(`--${boundary}--`);
-      // 找第一个 boundary 之后到下一个 boundary 之间的内容
-      let start = raw.indexOf(boundaryBuf) + boundaryBuf.length;
-      if (raw.slice(start, start + 2).equals(Buffer.from('\r\n'))) start += 2;
-      const nextBoundary = raw.indexOf(boundaryBuf, start);
-      const part = nextBoundary === -1 ? raw.slice(start) : raw.slice(start, nextBoundary);
-      // 去掉尾部 \r\n
-      let partEnd = part.length;
-      while (partEnd > 0 && (part[partEnd - 1] === 0x0d || part[partEnd - 1] === 0x0a)) partEnd--;
-      const partData = part.slice(0, partEnd);
-      // 找 header 和 body 的分界：\r\n\r\n
-      let headerEnd = -1;
-      for (let i = 0; i < partData.length - 3; i++) {
-        if (partData[i] === 0x0d && partData[i + 1] === 0x0a && partData[i + 2] === 0x0d && partData[i + 3] === 0x0a) {
-          headerEnd = i;
-          break;
+      try {
+        const raw = Buffer.concat(bufs);
+        if (raw.length > MAX_WALLPAPER_BYTES) throw httpError(413, '壁纸文件过大');
+        const ct = req.headers['content-type'] || '';
+        const boundary = ct.match(/boundary=(.+)/)?.[1];
+        if (!boundary) throw httpError(400, '缺少 multipart boundary');
+        const boundaryBuf = Buffer.from(`--${boundary}`);
+        // 找第一个 boundary 之后到下一个 boundary 之间的内容
+        let start = raw.indexOf(boundaryBuf);
+        if (start === -1) throw httpError(400, 'multipart 格式错误');
+        start += boundaryBuf.length;
+        if (raw.slice(start, start + 2).equals(Buffer.from('\r\n'))) start += 2;
+        const nextBoundary = raw.indexOf(boundaryBuf, start);
+        const part = nextBoundary === -1 ? raw.slice(start) : raw.slice(start, nextBoundary);
+        // 去掉尾部 \r\n
+        let partEnd = part.length;
+        while (partEnd > 0 && (part[partEnd - 1] === 0x0d || part[partEnd - 1] === 0x0a)) partEnd--;
+        const partData = part.slice(0, partEnd);
+        // 找 header 和 body 的分界：\r\n\r\n
+        let headerEnd = -1;
+        for (let i = 0; i < partData.length - 3; i++) {
+          if (partData[i] === 0x0d && partData[i + 1] === 0x0a && partData[i + 2] === 0x0d && partData[i + 3] === 0x0a) {
+            headerEnd = i;
+            break;
+          }
         }
+        if (headerEnd === -1) throw httpError(400, 'multipart 格式错误');
+        const header = partData.slice(0, headerEnd).toString();
+        const body = partData.slice(headerEnd + 4);
+        // 去掉末尾可能的多余 \r\n
+        let bodyEnd = body.length;
+        while (bodyEnd > 0 && (body[bodyEnd - 1] === 0x0d || body[bodyEnd - 1] === 0x0a)) bodyEnd--;
+        const cleanBody = body.slice(0, bodyEnd);
+        const filenameMatch = header.match(/filename="(.+?)"/);
+        if (!filenameMatch) throw httpError(400, '缺少文件名');
+        const fname = safeWallpaperFilename(filenameMatch[1]);
+        const picRoot = path.resolve(picDir);
+        const dest = path.resolve(picRoot, fname);
+        if (!dest.startsWith(`${picRoot}${path.sep}`)) throw httpError(400, '无效的壁纸文件名');
+        fs.writeFileSync(dest, cleanBody);
+        log(`壁纸已上传: ${fname}`);
+        return send(res, 200, { ok: true, path: `/pic/${encodeURIComponent(fname)}` });
+      } catch (err) {
+        return send(res, err.status || 500, { error: err.message || '上传失败' });
       }
-      if (headerEnd === -1) return send(res, 400, { error: 'Bad multipart' });
-      const header = partData.slice(0, headerEnd).toString();
-      const body = partData.slice(headerEnd + 4);
-      // 去掉末尾可能的多余 \r\n
-      let bodyEnd = body.length;
-      while (bodyEnd > 0 && (body[bodyEnd - 1] === 0x0d || body[bodyEnd - 1] === 0x0a)) bodyEnd--;
-      const cleanBody = body.slice(0, bodyEnd);
-      const filenameMatch = header.match(/filename="(.+?)"/);
-      if (!filenameMatch) return send(res, 400, { error: 'No filename' });
-      const fname = filenameMatch[1];
-      const dest = path.join(picDir, fname);
-      fs.writeFileSync(dest, cleanBody);
-      log(`Wallpaper uploaded: ${fname}`);
-      return send(res, 200, { ok: true, path: `/pic/${fname}` });
     });
     return;
   }
@@ -1534,14 +1567,14 @@ async function api(req, res, url) {
         const fp = path.join(dir, f);
         if (fs.existsSync(fp)) fs.unlinkSync(fp);
       });
-      log(`Cleared session data: ${id}`);
+      log(`Session 数据已清除: ${id}`);
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && action === 'clear-history') {
       const dir = sessionDir(id);
       const fp = path.join(dir, 'claude-history.jsonl');
       if (fs.existsSync(fp)) fs.unlinkSync(fp);
-      log(`Cleared history file: ${id}`);
+      log(`历史文件已清除: ${id}`);
       return send(res, 200, { ok: true });
     }
     if (req.method === 'POST' && action === 'import') {
@@ -1551,7 +1584,7 @@ async function api(req, res, url) {
       if (body.fromSessionId) {
         // 从已有 session 导入
         const fromDir = sessionDir(body.fromSessionId);
-        if (!fs.existsSync(fromDir)) throw httpError(404, 'Source session not found');
+        if (!fs.existsSync(fromDir)) throw httpError(404, '源 Session 不存在');
         const interceptsSrc = path.join(fromDir, 'https-intercepts.json');
         const historySrc = path.join(fromDir, 'claude-history.jsonl');
         if (fs.existsSync(interceptsSrc)) copyIntoSession(interceptsSrc, path.join(dir, 'https-intercepts.json'));
@@ -1560,7 +1593,7 @@ async function api(req, res, url) {
         if (body.interceptsPath) copyIntoSession(body.interceptsPath, path.join(dir, 'https-intercepts.json'));
         if (body.historyPath) copyIntoSession(body.historyPath, path.join(dir, 'claude-history.jsonl'));
       }
-      log(`Imported files into session ${id}`);
+      log(`文件已导入 Session ${id}`);
       return send(res, 200, sessionOverview(id));
     }
     const interceptDetailMatch = url.pathname.match(/^\/api\/sessions\/([^/]+)\/intercepts\/(\d+)$/);
@@ -1569,7 +1602,7 @@ async function api(req, res, url) {
     }
     if (req.method === 'GET' && action === 'intercepts' && url.pathname.endsWith('/intercepts')) {
       const file = path.join(sessionDir(id), 'https-intercepts.json');
-      if (!fs.existsSync(file)) throw httpError(404, 'No intercepts file in session');
+      if (!fs.existsSync(file)) throw httpError(404, 'Session 中没有抓包文件');
       const parsed = parseIntercepts(file);
       return send(res, 200, {
         stats: parsed.stats,
@@ -1599,28 +1632,44 @@ async function api(req, res, url) {
     if (req.method === 'GET' && action === 'file') {
       const fileName = url.searchParams.get('name');
       if (!['instance.json', 'trajectory.jsonl', 'delivery.jsonl', 'qc-report.json', 'verification-result.json'].includes(fileName)) {
-        throw httpError(400, 'Unsupported file');
+        throw httpError(400, '不支持的文件类型');
       }
       const file = path.join(sessionDir(id), fileName);
-      if (!fs.existsSync(file)) throw httpError(404, 'File not found');
+      if (!fs.existsSync(file)) throw httpError(404, '文件不存在');
       return send(res, 200, fs.readFileSync(file, 'utf8'));
     }
     if (req.method === 'GET' && action === 'download') {
       const fileName = url.searchParams.get('name');
       if (!['instance.json', 'trajectory.jsonl', 'delivery.jsonl', 'qc-report.json', 'verification-result.json'].includes(fileName)) {
-        throw httpError(400, 'Unsupported file');
+        throw httpError(400, '不支持的文件类型');
       }
       const file = path.join(sessionDir(id), fileName);
-      if (!fs.existsSync(file)) throw httpError(404, 'File not found');
+      if (!fs.existsSync(file)) throw httpError(404, '文件不存在');
       res.writeHead(200, {
         'content-type': 'application/octet-stream',
         'content-disposition': `attachment; filename="${fileName}"`,
       });
       return res.end(fs.readFileSync(file));
     }
+    if (req.method === 'GET' && action === 'export-zip') {
+      const dir = sessionDir(id);
+      const files = ['trajectory.jsonl', 'instance.json'];
+      const missing = files.filter((f) => !fs.existsSync(path.join(dir, f)));
+      if (missing.length) throw httpError(404, `缺少文件: ${missing.join(', ')}`);
+      const zip = new AdmZip();
+      for (const f of files) {
+        zip.addFile(`${id}/${f}`, fs.readFileSync(path.join(dir, f)));
+      }
+      res.writeHead(200, {
+        'content-type': 'application/zip',
+        'content-disposition': `attachment; filename="${id}.zip"`,
+      });
+      res.end(zip.toBuffer());
+      return;
+    }
     if (req.method === 'POST' && action === 'open-dir') {
       const dir = assertInsideSessions(sessionDir(id));
-      if (!fs.existsSync(dir)) throw httpError(404, 'Session not found');
+      if (!fs.existsSync(dir)) throw httpError(404, 'Session 不存在');
       const opener = process.platform === 'win32' ? 'explorer.exe' : process.platform === 'darwin' ? 'open' : 'xdg-open';
       spawn(opener, [dir], { detached: true, stdio: 'ignore' }).unref();
       return send(res, 200, { ok: true, path: dir });
@@ -1628,65 +1677,132 @@ async function api(req, res, url) {
   }
 
   if (req.method === 'POST' && url.pathname === '/api/certs/setup') {
-    if (setupProcess) throw httpError(409, 'Certificate setup is already running');
+    if (setupProcess) throw httpError(409, '证书生成已在运行中');
     setupProcess = spawn(process.execPath, [path.join(ROOT, 'setup-https-proxy.js')], { cwd: ROOT });
     setupProcess.stdout.on('data', (d) => log(String(d).trim()));
     setupProcess.stderr.on('data', (d) => log(String(d).trim()));
     setupProcess.on('exit', (code) => {
-      log(`Certificate setup exited with code ${code}`);
+      log(`证书生成进程已退出，exit code: ${code}`);
       setupProcess = null;
     });
     return send(res, 200, { ok: true });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/proxy/start') {
-    if (proxyProcess) throw httpError(409, 'Proxy is already running');
+    if (proxyProcess) throw httpError(409, '代理已在运行中');
     const body = await parseBody(req);
     const id = safeSessionId(body.sessionId);
     const dir = sessionDir(id);
     ensureDir(dir);
+    const port = body.port || 8888;
+
+    // 端口可用性预检：bind 一下后立即释放（不指定 host，与 forward-proxy.js 保持一致）
+    const portAvailable = await new Promise((resolve) => {
+      const tester = net.createServer();
+      tester.once('error', (err) => resolve(err.code !== 'EADDRINUSE'));
+      tester.once('listening', () => { tester.close(); resolve(true); });
+      tester.listen(port);
+    });
+    if (!portAvailable) throw httpError(409, `端口 ${port} 已被占用`);
+
     const env = {
       ...process.env,
-      PROXY_PORT: String(body.port || 8888),
+      PROXY_PORT: String(port),
       TARGET_HOST: body.targetHost || '',
       RESULTS_DIR: dir,
     };
     proxyProcess = spawn(process.execPath, [path.join(ROOT, 'forward-proxy.js')], { cwd: ROOT, env });
     proxyProcess.stdout.on('data', (d) => log(String(d).trim()));
     proxyProcess.stderr.on('data', (d) => log(String(d).trim()));
+
+    // 秒挂检测：代理进程启动后很短时间内退出则记一条错误日志
+    const quickExitTimer = setTimeout(() => {
+      if (proxyProcess === null) {
+        log('⚠️  代理启动后立刻退出，请检查上方日志排查原因');
+      }
+    }, 3000);
+
     proxyProcess.on('exit', (code) => {
-      log(`Proxy exited with code ${code}`);
+      clearTimeout(quickExitTimer);
+      log(`代理已退出，exit code: ${code}`);
       proxyProcess = null;
       proxySessionId = null;
     });
+
     proxySessionId = id;
-    log(`Proxy started for session ${id} on port ${env.PROXY_PORT}`);
+    log(`代理已启动，Session: ${id}，端口: ${port}`);
     return send(res, 200, { ok: true });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/proxy/stop') {
     if (!proxyProcess) return send(res, 200, { ok: true, stopped: false });
-    proxyProcess.kill('SIGINT');
+    const p = proxyProcess;
+    const pid = p.pid;
+    log(`正在停止代理 (pid ${pid})...`);
+
+    // 先尝试 SIGINT，Unix/macOS 会触发 graceful shutdown
+    p.kill('SIGINT');
+
+    // 等待进程真正退出；Windows 上 SIGINT 不会生效，超时后走 SIGTERM → taskkill
+    const exited = await new Promise((resolve) => {
+      const onExit = () => resolve(true);
+      p.on('exit', onExit);
+
+      // 1.5s 后若未退出，在 Windows 上用 SIGTERM 再试
+      const sigtermTimer = setTimeout(() => {
+        if (p.exitCode !== null) return;
+        log('SIGINT 未能停止代理，尝试 SIGTERM...');
+        try { p.kill('SIGTERM'); } catch {}
+      }, 1500);
+
+      // 3s 后若仍未退出，Windows 上走 taskkill 强杀
+      const forceTimer = setTimeout(() => {
+        if (p.exitCode !== null) return;
+        log('SIGTERM 未能停止代理，Windows 上强制终止...');
+        try {
+          if (process.platform === 'win32') {
+            require('child_process').execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+          } else {
+            p.kill('SIGKILL');
+          }
+        } catch {}
+        // taskkill 成功会触发 exit 事件；若仍没有，手动 resolve
+        setTimeout(() => { if (p.exitCode === null) resolve(false); }, 400);
+      }, 3000);
+
+      p.on('exit', () => {
+        clearTimeout(sigtermTimer);
+        clearTimeout(forceTimer);
+        onExit();
+      });
+    });
+
+    log(exited ? `代理已停止 (pid ${pid})` : `代理进程 ${pid} 已被强制终止`);
     return send(res, 200, { ok: true, stopped: true });
   }
 
   if (req.method === 'POST' && url.pathname === '/api/shutdown') {
     const stoppedProxy = Boolean(proxyProcess);
     if (proxyProcess) {
-      proxyProcess.kill('SIGINT');
+      const p = proxyProcess;
       proxyProcess = null;
+      p.kill('SIGINT');
+      // Windows fallback: SIGINT 不生效则 1s 后发 SIGTERM
+      setTimeout(() => { try { p.kill('SIGTERM'); } catch {} }, 1000);
     }
     if (setupProcess) {
-      setupProcess.kill('SIGINT');
+      const s = setupProcess;
       setupProcess = null;
+      s.kill('SIGINT');
+      setTimeout(() => { try { s.kill('SIGTERM'); } catch {} }, 1000);
     }
-    log('Workbench shutdown requested, exiting…');
+    log('收到关闭工作台请求，正在退出…');
     send(res, 200, { ok: true, stoppedProxy });
     setTimeout(() => process.exit(0), 250);
     return;
   }
 
-  throw httpError(404, 'API route not found');
+  throw httpError(404, 'API 路由不存在');
 }
 
 // ── Terminal / Shell (node-pty) ─────────────────────────
@@ -1746,7 +1862,7 @@ function spawnPty(shellCmd, cols, rows, cwd, onExit) {
   }
 
   const workDir = (cwd && fs.existsSync(cwd)) ? cwd : process.cwd();
-  log(`PTY spawning: ${cmd} ${args.join(' ')} (${cols}x${rows}) cwd=${workDir}`);
+  log(`终端启动: ${cmd} ${args.join(' ')} (${cols}x${rows}) 工作目录=${workDir}`);
   const ptyProc = pty.spawn(cmd, args, {
     name: 'xterm-256color',
     cols: cols || 80,
@@ -1756,7 +1872,7 @@ function spawnPty(shellCmd, cols, rows, cwd, onExit) {
   });
 
   ptyProc.onExit(({ exitCode, signal }) => {
-    log(`PTY exited: ${cmd} (code ${exitCode}, signal ${signal})`);
+    log(`终端已退出: ${cmd} (exit code ${exitCode}, signal ${signal})`);
     if (onExit) onExit();
   });
 
@@ -1771,7 +1887,7 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname.startsWith('/api/')) return await api(req, res, url);
     return serveStatic(res, url.pathname);
   } catch (err) {
-    send(res, err.status || 500, { error: err.message || 'Internal error' });
+    send(res, err.status || 500, { error: err.message || '内部错误' });
   }
 });
 
@@ -1795,7 +1911,7 @@ server.on('upgrade', (req, socket, head) => {
         }, 50);
       });
 
-      log(`Terminal connected: ${shell || getDefaultShell()}`);
+      log(`终端已连接: ${shell || getDefaultShell()}`);
 
       ptyProc.onData((data) => {
         if (ws.readyState === 1) ws.send(data);
@@ -1817,7 +1933,7 @@ server.on('upgrade', (req, socket, head) => {
       });
 
       ws.on('close', () => {
-        log('Terminal disconnected');
+        log('终端已断开');
         try { ptyProc.kill(); } catch {}
       });
     });
@@ -1827,5 +1943,5 @@ server.on('upgrade', (req, socket, head) => {
 });
 
 server.listen(PORT, HOST, () => {
-  log(`Workbench running at http://${HOST}:${PORT}`);
+  log(`工作台已启动 http://${HOST}:${PORT}`);
 });

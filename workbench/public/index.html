@@ -130,12 +130,20 @@
           <section class="panel">
             <div class="panel-head">
               <h2>抓包数据</h2>
+              <div class="metrics" id="captureMetrics"></div>
               <div class="actions compact">
                 <button id="loadIntercepts" class="primary"><span class="btn-icon">↻</span>刷新抓包</button>
                 <button id="runVerify" class="primary"><span class="btn-icon">✓</span>运行验证</button>
               </div>
             </div>
-            <div class="metrics" id="captureMetrics"></div>
+            <div class="toolbar-row" id="interceptToolbar" style="display:none">
+              <div class="filter-bar">
+                <select id="filterStatus"><option value="">状态：全部</option><option value="ok">成功 (2xx)</option><option value="fail">失败</option></select>
+                <select id="filterModel"><option value="">模型：全部</option></select>
+                <input id="filterSearch" placeholder="搜索内容…" class="filter-input">
+              </div>
+              <span class="filter-count" id="filterCount"></span>
+            </div>
             <div class="table-wrap">
               <table>
                 <thead>
@@ -185,9 +193,8 @@
             <label>Summary CoT（思维链摘要）<textarea id="summaryCot" rows="4" placeholder="留空自动生成草稿，可再人工修订"></textarea></label>
             <div class="actions">
               <button id="convert" class="primary"><span class="btn-icon">✦</span>生成 SOP JSONL + 质检</button>
-              <button id="loadTrajectory"><span class="btn-icon">◉</span>查看 trajectory.jsonl</button>
-              <button id="downloadTrajectory"><span class="btn-icon">⇩</span>下载 trajectory.jsonl</button>
-              <button id="downloadInstance"><span class="btn-icon">⇩</span>下载 instance.json</button>
+              <button id="loadTrajectory" class="primary"><span class="btn-icon">◉</span>查看 trajectory.jsonl</button>
+              <button id="exportZip" class="primary"><span class="btn-icon">📦</span>一键打包并下载 trajectory.jsonl 和 instance.json</button>
             </div>
           </section>
 

@@ -99,7 +99,7 @@ function highlightLog(line) {
   s = s.replace(/\[(\d{1,2}:\d{2}:\d{2}\s*[AP]M?)\]/g, '<span class="log-time">[$1]</span>');
   s = s.replace(/\b(Proxy|proxy)\b/g, '<span class="log-proxy">$1</span>');
   s = s.replace(/\b(error|Error|ERROR|failed|Failed|exited)\b/g, '<span class="log-err">$1</span>');
-  s = s.replace(/\b(started|Created|Imported|running)\b/g, '<span class="log-info">$1</span>');
+  s = s.replace(/\b(started|Created|Imported|running|已|启动|创建|导入|运行|停止|关闭)\b/g, '<span class="log-info">$1</span>');
   return s;
 }
 
@@ -112,7 +112,7 @@ async function refreshStatus() {
   state.certPath = status.certs.certPath || '';
   state.picDir = (status.certs && status.certs.picDir) ? status.certs.picDir : '';
   const proxy = $('proxyStatus');
-  proxy.textContent = status.proxyRunning ? '◉ Proxy: running' : '○ Proxy: stopped';
+  proxy.textContent = status.proxyRunning ? '◉ 代理运行中' : '○ 代理已停止';
   proxy.classList.toggle('running', status.proxyRunning);
   proxy.classList.toggle('stopped', !status.proxyRunning);
   setProxyButtonState(status.proxyRunning);
@@ -136,7 +136,15 @@ async function refreshStatus() {
 
   const select = $('sessionSelect');
   const previous = select.value || state.currentSession;
-  select.innerHTML = state.sessions.map((s) => `<option value="${s.id}">${escapeHtml(s.name)}</option>`).join('');
+  select.innerHTML = state.sessions.map((s) => {
+    const badges = [];
+    if (s.hasIntercepts) badges.push('⬇');   // ⬇ 抓包
+    if (s.hasHistory) badges.push('📜'); // 📜 历史
+    if (s.hasVerification) badges.push('🔍'); // 🔍 验证
+    if (s.hasDelivery) badges.push('✅');      // ✅ 交付
+    const suffix = badges.length ? `  ·  ${badges.join(' ')}` : '';
+    return `<option value="${s.id}">${escapeHtml(s.name)}${suffix}</option>`;
+  }).join('');
   if (state.sessions.length) {
     select.value = state.sessions.some((s) => s.id === previous) ? previous : state.sessions[0].id;
     state.currentSession = select.value;
@@ -282,6 +290,7 @@ async function renameSession() {
 async function clearSession() {
   if (!confirm('确认清除当前工作台显示的抓包数据、验证结果和交付预览？\n\n只是清空页面显示，不会删除 Session 里已保存的文件。')) return;
   $('interceptsTable').innerHTML = '';
+  $('interceptToolbar').style.display = 'none';
   $('verifyMetrics').innerHTML = '';
   $('verifyTable').innerHTML = '';
   $('verifyResult').textContent = '';
@@ -613,21 +622,55 @@ function sortRecords(records, field, dir) {
   return dir === 'desc' ? sorted.reverse() : sorted;
 }
 
-async function loadIntercepts(options = {}) {
-  const data = await api(`/api/sessions/${currentSessionId()}/intercepts`);
-  state.lastInterceptRecords = data.records;
-  renderMetrics($('captureMetrics'), [
-    ['成功对话请求', data.stats.successfulRequests, 'ok'],
-    ['失败请求', data.stats.failedRequests, data.stats.failedRequests ? 'warn' : 'ok'],
-    ['总抓包', data.stats.totalInterceptions, ''],
-    ['目标 Host', data.stats.targetHost || '*', ''],
-  ]);
-  const sorted = sortRecords(data.records, state.sortField, state.sortDir);
+function populateModelFilter(records) {
+  const models = [...new Set(records.map((r) => r.requestModel || r.responseModel || '').filter(Boolean))].sort();
+  const sel = $('filterModel');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">模型：全部</option>' + models.map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join('');
+  if (models.includes(current)) sel.value = current;
+}
+
+function applyInterceptFilters(records) {
+  const fStatus = $('filterStatus').value;
+  const fModel = $('filterModel').value;
+  const fSearch = $('filterSearch').value.trim().toLowerCase();
+
+  let filtered = records;
+  if (fStatus === 'ok') filtered = filtered.filter((r) => r.status >= 200 && r.status < 300);
+  if (fStatus === 'fail') filtered = filtered.filter((r) => r.status < 200 || r.status >= 300);
+  if (fModel) filtered = filtered.filter((r) => (r.requestModel || r.responseModel || '') === fModel);
+  if (fSearch) {
+    filtered = filtered.filter((r) =>
+      (r.path || '').toLowerCase().includes(fSearch) ||
+      (r.responsePreview || '').toLowerCase().includes(fSearch) ||
+      (r.toolCalls || []).some((t) => t.toLowerCase().includes(fSearch))
+    );
+  }
+  return filtered;
+}
+
+function refreshInterceptTable() {
+  const records = state.lastInterceptRecords;
+  if (!records || !records.length) {
+    $('interceptsTable').innerHTML = `<tr><td colspan="9">${emptyState('📡', '还没有抓包数据，先启动代理采集吧~')}</td></tr>`;
+    $('interceptToolbar').style.display = 'none';
+    $('filterCount').textContent = '';
+    return;
+  }
+  const filtered = applyInterceptFilters(records);
+  const sorted = sortRecords(filtered, state.sortField, state.sortDir);
+
+  const bar = $('interceptToolbar');
+  bar.style.display = 'flex';
+  populateModelFilter(records);
+
+  $('filterCount').textContent = filtered.length === records.length
+    ? `${records.length} 条`
+    : `${filtered.length} / ${records.length} 条`;
+
   const tbody = $('interceptsTable');
-  // Preserve header row
-  const headerRow = tbody.querySelector('tr:first-child');
-  if (!data.records.length) {
-    tbody.innerHTML = `<tr><td colspan="9">${emptyState('📡', '还没有抓包数据，先启动代理采集吧~')}</td></tr>`;
+  if (!filtered.length) {
+    tbody.innerHTML = `<tr><td colspan="9">${emptyState('🔍', '没有匹配的抓包记录')}</td></tr>`;
   } else {
     tbody.innerHTML = sorted.map((r) => `
       <tr class="clickable-row" data-index="${r.seqIndex}">
@@ -646,6 +689,18 @@ async function loadIntercepts(options = {}) {
   tbody.querySelectorAll('tr[data-index]').forEach((row) => {
     row.addEventListener('click', () => showInterceptDetail(row.dataset.index));
   });
+}
+
+async function loadIntercepts(options = {}) {
+  const data = await api(`/api/sessions/${currentSessionId()}/intercepts`);
+  state.lastInterceptRecords = data.records;
+  renderMetrics($('captureMetrics'), [
+    ['成功对话请求', data.stats.successfulRequests, 'ok'],
+    ['失败请求', data.stats.failedRequests, data.stats.failedRequests ? 'warn' : 'ok'],
+    ['总抓包', data.stats.totalInterceptions, ''],
+    ['目标 Host', data.stats.targetHost || '*', ''],
+  ]);
+  refreshInterceptTable();
   if (!options.quiet) showToast('抓包数据已刷新', 'info', 1800);
 }
 
@@ -743,7 +798,7 @@ function renderVerifyTable(data) {
     </tr>`;
   }).join('');
   return `<div class="table-wrap mini-table"><table>
-    <thead><tr><th>Proxy</th><th>Claude</th><th>Confidence</th><th>User</th><th>Response</th><th>Model</th><th>Tools</th><th>Thinking</th></tr></thead>
+    <thead><tr><th>代理</th><th>Claude</th><th>置信度</th><th>User</th><th>回复</th><th>模型</th><th>工具</th><th>思考</th></tr></thead>
     <tbody>${rows || `<tr><td colspan="8">${emptyState('◇', '暂无验证详情')}</td></tr>`}</tbody>
   </table></div>`;
 }
@@ -1062,9 +1117,6 @@ async function loadTrajectory() {
   showToast('trajectory.jsonl 已加载', 'success');
 }
 
-function downloadFile(name) {
-  window.location.href = `/api/sessions/${currentSessionId()}/download?name=${name}`;
-}
 
 function renderQc(qc) {
   renderMetrics($('qcMetrics'), [
@@ -1411,6 +1463,15 @@ function bind() {
   $('stopProxy').addEventListener('click', wrap(stopProxy, $('stopProxy')));
   $('shutdownWorkbench').addEventListener('click', shutdownWorkbench);
   $('loadIntercepts').addEventListener('click', wrap(loadIntercepts, $('loadIntercepts')));
+  // 筛选控件
+  ['filterStatus', 'filterModel'].forEach((id) => {
+    $(id).addEventListener('change', refreshInterceptTable);
+  });
+  $('filterSearch').addEventListener('input', () => {
+    // 防抖：输入停止 250ms 后再刷新
+    clearTimeout(state.filterTimer);
+    state.filterTimer = setTimeout(refreshInterceptTable, 250);
+  });
   // Sortable table headers
   document.querySelectorAll('th.sortable').forEach((th) => {
     th.addEventListener('click', () => {
@@ -1441,8 +1502,24 @@ function bind() {
   });
   $('convert').addEventListener('click', wrap(convert, $('convert')));
   $('loadTrajectory').addEventListener('click', wrap(loadTrajectory, $('loadTrajectory')));
-  $('downloadTrajectory').addEventListener('click', () => { downloadFile('trajectory.jsonl'); showToast('下载中', 'info'); });
-  $('downloadInstance').addEventListener('click', () => { downloadFile('instance.json'); showToast('下载中', 'info'); });
+  $('exportZip').addEventListener('click', wrap(async () => {
+    const id = currentSessionId();
+    const resp = await fetch(`/api/sessions/${id}/export-zip`);
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({ error: '下载失败' }));
+      throw new Error(err.error || `HTTP ${resp.status}`);
+    }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${id}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showToast('打包下载完成', 'success');
+  }, $('exportZip')));
   $('copyBaseCommitCmd').addEventListener('click', () => {
     const cmd = $('baseCommitCmd').textContent;
     navigator.clipboard.writeText(cmd).then(() => showToast('命令已复制', 'info', 2000)).catch(() => showToast('复制失败', 'error'));
