@@ -9,6 +9,7 @@ const state = {
   sortField: null,
   sortDir: 'asc',
   terminal: { term: null, ws: null, fit: null, ready: false, connecting: false, shell: '', currentShell: '', cwd: '' },
+  replay: { data: null, selected: null, onlyProblems: false },
 };
 
 const $ = (id) => document.getElementById(id);
@@ -156,6 +157,11 @@ async function refreshStatus() {
 async function refreshSession() {
   const id = $('sessionSelect').value;
   if (!id) return;
+  if (state.replay.data && state.replay.data.sessionId !== id) {
+    state.replay.data = null;
+    state.replay.selected = null;
+    if (document.querySelector('#workspaceD.active')) renderReplay();
+  }
   const overview = await api(`/api/sessions/${id}`);
   state.currentOverview = overview;
   const fileIcons = {
@@ -218,6 +224,11 @@ async function refreshSession() {
     ]);
   }
   loadMetadataDraft();
+  if (document.querySelector('#workspaceD.active') && (!state.replay.data || state.replay.data.sessionId !== id)) {
+    loadReplay({ quiet: true }).catch((err) => {
+      showToast(err.message || '回放加载失败', 'error', 3000);
+    });
+  }
 }
 
 function renderSessionSummary(overview) {
@@ -708,6 +719,7 @@ async function runVerify() {
       </div>
     </div>`;
   $('verifyTable').innerHTML = renderVerifyTable(data);
+  bindVerifyReplayLinks();
   $('verifyResult').textContent = JSON.stringify(data, null, 2);
   await refreshSession();
   if (s.allGood) showToast('验证全部通过 ✦', 'success');
@@ -718,7 +730,8 @@ function renderVerifyTable(data) {
   const rows = (data.details || []).map((d) => {
     const c = d.checks || {};
     const cls = c.matched && c.responseMatch && c.modelMatch && c.responseToolMatch ? 'ok-row' : 'bad-row';
-    return `<tr class="${cls}">
+    const replayAttr = d.clientRound !== null && d.clientRound !== undefined ? `data-replay-turn="${d.clientRound}"` : '';
+    return `<tr class="${cls} ${replayAttr ? 'clickable-row' : ''}" ${replayAttr}>
       <td>${d.proxyIndex ?? '-'}</td>
       <td>${d.clientRound ?? '未匹配'}</td>
       <td>${Math.round((d.confidence || 0) * 100)}%</td>
@@ -735,10 +748,289 @@ function renderVerifyTable(data) {
   </table></div>`;
 }
 
+function bindVerifyReplayLinks() {
+  $('verifyTable').querySelectorAll('[data-replay-turn]').forEach((row) => {
+    row.addEventListener('click', () => {
+      openReplayTurn(Number(row.dataset.replayTurn)).catch((err) => {
+        showToast(err.message || '无法打开回放轮次', 'error', 3000);
+      });
+    });
+  });
+}
+
 function statusMark(value) {
   if (value === true) return '<span class="mark ok">yes</span>';
   if (value === false) return '<span class="mark bad">no</span>';
   return '<span class="mark muted">-</span>';
+}
+
+/* ===== Replay debugger ===== */
+function replayStatusText(status) {
+  return { ok: '通过', warn: '警告', error: '失败' }[status] || '未知';
+}
+
+function replayStatusClass(status) {
+  return status === 'ok' ? 'ok' : status === 'warn' ? 'warn' : 'error';
+}
+
+function replayText(value) {
+  if (value === undefined || value === null || value === '') return '-';
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value, null, 2);
+}
+
+function firstMismatchIndex(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  const len = Math.min(left.length, right.length);
+  for (let i = 0; i < len; i++) {
+    if (left[i] !== right[i]) return i;
+  }
+  return left.length === right.length ? -1 : len;
+}
+
+function renderReplayMetrics(data) {
+  const s = data.summary || {};
+  renderMetrics($('replayMetrics'), [
+    ['轮次', s.turns ?? 0, ''],
+    ['代理请求', s.proxyRequests ?? 0, ''],
+    ['匹配轮次', s.matchedTurns ?? 0, (s.matchedTurns || 0) ? 'ok' : 'warn'],
+    ['正式问题', s.problemTurns ?? 0, s.problemTurns ? 'warn' : 'ok'],
+    ['额外请求', s.extraProxyWarnings ?? 0, s.extraProxyWarnings ? 'warn' : 'ok'],
+    ['注意项', s.attentionItems ?? 0, s.attentionItems ? 'warn' : 'ok'],
+    ['失败', s.errorTurns ?? 0, s.errorTurns ? 'error' : 'ok'],
+    ['trajectory 行', s.trajectoryLines ?? 0, s.trajectoryLines ? 'ok' : 'warn'],
+  ]);
+}
+
+async function loadReplay(options = {}) {
+  const data = await api(`/api/sessions/${currentSessionId()}/replay`);
+  state.replay.data = data;
+  state.replay.onlyProblems = Boolean($('replayOnlyProblems')?.checked);
+  if (options.turnIndex !== undefined && options.turnIndex !== null) {
+    state.replay.selected = { kind: 'turn', index: Number(options.turnIndex) };
+  } else if (!state.replay.selected) {
+    const firstProblem = data.turns.find((turn) => turn.status !== 'ok');
+    state.replay.selected = firstProblem
+      ? { kind: 'turn', index: firstProblem.turnIndex }
+      : (data.turns[0] ? { kind: 'turn', index: data.turns[0].turnIndex } : null);
+  }
+  renderReplay();
+  if (!options.quiet) showToast('轨迹回放已加载', 'success', 1800);
+}
+
+function renderReplay() {
+  const data = state.replay.data;
+  if (!data) {
+    $('replayMetrics').innerHTML = '';
+    $('replayTimeline').innerHTML = emptyState('◇', '还没有加载回放数据');
+    $('replayDetail').innerHTML = emptyState('◇', '选择一个 Session 后点击“加载回放”');
+    $('replayDiagnostics').innerHTML = emptyState('◇', '暂无诊断');
+    return;
+  }
+  renderReplayMetrics(data);
+  renderReplayTimeline(data);
+  renderReplayDetail(data);
+}
+
+function renderReplayTimeline(data) {
+  const onlyProblems = state.replay.onlyProblems;
+  const turns = onlyProblems ? data.turns.filter((turn) => turn.status !== 'ok') : data.turns;
+  const proxyOnly = data.proxyOnly || [];
+  const rows = [];
+
+  for (const turn of turns) {
+    const selected = state.replay.selected?.kind === 'turn' && state.replay.selected.index === turn.turnIndex;
+    const note = replayTurnNote(turn);
+    rows.push(`
+      <button class="replay-node ${replayStatusClass(turn.status)} ${selected ? 'active' : ''}" data-turn-index="${turn.turnIndex}">
+        <span class="replay-node-main">
+          <strong>#${turn.turnIndex}</strong>
+          <span>${escapeHtml(replayStatusText(turn.status))}</span>
+        </span>
+        <span class="replay-node-sub">${escapeHtml(turn.proxy?.requestModel || turn.assistant?.modelId || 'model: -')}</span>
+        <span class="replay-node-note">${escapeHtml(note)}</span>
+      </button>
+    `);
+  }
+
+  proxyOnly.forEach((item, index) => {
+    const selected = state.replay.selected?.kind === 'proxyOnly' && state.replay.selected.index === index;
+    const firstDiag = (item.diagnostics || [])[0] || {};
+    const label = item.status === 'warn' ? '旁路' : '未匹配';
+    rows.push(`
+      <button class="replay-node ${replayStatusClass(item.status)} ${selected ? 'active' : ''}" data-proxy-only-index="${index}">
+        <span class="replay-node-main">
+          <strong>Proxy #${item.proxy?.seqIndex ?? '-'}</strong>
+          <span>${escapeHtml(label)}</span>
+        </span>
+        <span class="replay-node-sub">${escapeHtml(item.proxy?.path || '')}</span>
+        <span class="replay-node-note">${escapeHtml(firstDiag.message || '')}</span>
+      </button>
+    `);
+  });
+
+  $('replayTimeline').innerHTML = rows.join('') || emptyState('✓', onlyProblems ? '没有需要注意的轮次或额外请求' : '没有回放轮次');
+  $('replayTimeline').querySelectorAll('[data-turn-index]').forEach((btn) => {
+    btn.addEventListener('click', () => selectReplayTurn(Number(btn.dataset.turnIndex)));
+  });
+  $('replayTimeline').querySelectorAll('[data-proxy-only-index]').forEach((btn) => {
+    btn.addEventListener('click', () => selectReplayProxyOnly(Number(btn.dataset.proxyOnlyIndex)));
+  });
+}
+
+function replayTurnNote(turn) {
+  const diagnostics = turn.diagnostics || [];
+  const firstActionable = diagnostics.find((d) => d.level !== 'info');
+  if (firstActionable) return firstActionable.message || '';
+  if (turn.status === 'ok') {
+    const hasUserContextDelta = diagnostics.some((d) => d.code === 'user_mismatch');
+    return hasUserContextDelta ? '验证通过；User 仅有注入上下文差异' : '这一轮验证通过，结构完整';
+  }
+  return diagnostics[0]?.message || '';
+}
+
+function selectReplayTurn(turnIndex) {
+  state.replay.selected = { kind: 'turn', index: Number(turnIndex) };
+  renderReplay();
+}
+
+function selectReplayProxyOnly(index) {
+  state.replay.selected = { kind: 'proxyOnly', index: Number(index) };
+  renderReplay();
+}
+
+function renderReplayBlock(title, value, cls = '') {
+  return `<section class="replay-block ${cls}">
+    <h3>${escapeHtml(title)}</h3>
+    <pre>${escapeHtml(replayText(value))}</pre>
+  </section>`;
+}
+
+function renderReplayCompare(title, leftLabel, leftValue, rightLabel, rightValue) {
+  const left = String(leftValue || '');
+  const right = String(rightValue || '');
+  const mismatch = firstMismatchIndex(left, right);
+  const badge = mismatch === -1
+    ? '<span class="mark ok">一致</span>'
+    : `<span class="mark bad">首个差异 @ ${mismatch}</span>`;
+  return `<section class="replay-block replay-compare-block">
+    <h3>${escapeHtml(title)} ${badge}</h3>
+    <div class="replay-compare">
+      <div>
+        <div class="replay-compare-title">${escapeHtml(leftLabel)}</div>
+        <pre>${escapeHtml(replayText(left))}</pre>
+      </div>
+      <div>
+        <div class="replay-compare-title">${escapeHtml(rightLabel)}</div>
+        <pre>${escapeHtml(replayText(right))}</pre>
+      </div>
+    </div>
+  </section>`;
+}
+
+function renderReplayTools(toolUses = []) {
+  if (!toolUses.length) return renderReplayBlock('Tool Uses', '-');
+  const rows = toolUses.map((tool, index) => `
+    <div class="replay-tool">
+      <div><span class="metric ok">#${index}</span> <strong>${escapeHtml(tool.name || '-')}</strong> <span class="hint inline">${escapeHtml(tool.id || '')}</span></div>
+      <pre>${escapeHtml(JSON.stringify(tool.input || {}, null, 2))}</pre>
+    </div>
+  `).join('');
+  return `<section class="replay-block"><h3>Tool Uses</h3>${rows}</section>`;
+}
+
+function renderReplayDiagnosticsList(diagnostics = []) {
+  return diagnostics.map((item) => `
+    <li class="${replayStatusClass(item.level === 'info' ? 'ok' : item.level)}">
+      <strong>${escapeHtml(item.code || item.level)}</strong>
+      <span>${escapeHtml(item.message || '')}</span>
+    </li>
+  `).join('');
+}
+
+function renderReplayDetail(data) {
+  const selected = state.replay.selected;
+  if (!selected) {
+    $('replayDetailTitle').textContent = '选择一个轮次';
+    $('replayDetailMeta').textContent = '';
+    $('replayDetail').innerHTML = emptyState('◇', '没有可显示的回放轮次');
+    $('replayDiagnostics').innerHTML = emptyState('◇', '暂无诊断');
+    return;
+  }
+
+  if (selected.kind === 'proxyOnly') {
+    const item = data.proxyOnly[selected.index];
+    const titlePrefix = item?.status === 'warn' ? '旁路代理请求' : '未匹配代理请求';
+    $('replayDetailTitle').textContent = `${titlePrefix} #${item?.proxy?.seqIndex ?? '-'}`;
+    $('replayDetailMeta').textContent = item?.proxy?.url || '';
+    $('replayDetail').innerHTML = `
+      ${renderReplayBlock('Proxy Metadata', item?.proxy)}
+      ${renderReplayBlock('Proxy User', item?.proxy?.userContent)}
+      ${renderReplayBlock('Proxy Assistant', item?.proxy?.responseContent)}
+      ${renderReplayBlock('Proxy Reasoning', item?.proxy?.responseReasoning)}
+    `;
+    $('replayDiagnostics').innerHTML = `<ul class="replay-diagnostic-list">${renderReplayDiagnosticsList(item?.diagnostics || [])}</ul>`;
+    return;
+  }
+
+  const turn = data.turns.find((item) => item.turnIndex === selected.index) || data.turns[0];
+  if (!turn) return;
+  $('replayDetailTitle').textContent = `轮次 #${turn.turnIndex}`;
+  $('replayDetailMeta').textContent = `Proxy #${turn.proxy?.seqIndex ?? '-'} · ${replayStatusText(turn.status)}`;
+
+  const historyModel = turn.assistant?.modelId || '';
+  const trajectoryModel = turn.trajectory?.assistantLine?.data?.model || turn.trajectory?.userLine?.data?.model || '';
+  const modelSources = {
+    requestModel: turn.proxy?.requestModel || '',
+    responseModel: turn.proxy?.responseModel || '',
+    historyModel,
+    trajectoryModel,
+  };
+  $('replayDetail').innerHTML = `
+    ${renderReplayCompare('Assistant 对比', 'Proxy response', turn.proxy?.responseContent || '', 'Claude History', turn.assistant?.content || '')}
+    ${renderReplayBlock('User', turn.user?.content)}
+    ${turn.user?.toolResults?.length ? renderReplayBlock('Tool Results', turn.user.toolResults) : ''}
+    ${renderReplayBlock('Thinking', turn.assistant?.thinking)}
+    ${renderReplayTools(turn.assistant?.toolUses || [])}
+    ${renderReplayBlock('Model Sources', modelSources)}
+    ${renderReplayBlock('Proxy Metadata', {
+      path: turn.proxy?.path,
+      status: turn.proxy?.status,
+      duration: turn.proxy?.duration,
+      tokens: tokenText(turn.proxy?.usage),
+      hasSystemPrompt: turn.proxy?.hasSystemPrompt,
+    })}
+    ${renderReplayBlock('Trajectory Lines', turn.trajectory)}
+  `;
+
+  const checks = turn.verification?.checks || {};
+  $('replayDiagnostics').innerHTML = `
+    <ul class="replay-diagnostic-list">${renderReplayDiagnosticsList(turn.diagnostics || [])}</ul>
+    <div class="replay-checks">
+      ${metric('User', statusMarkText(checks.userContentMatch), checks.userContentMatch === false ? 'error' : 'ok')}
+      ${metric('Response', statusMarkText(checks.responseMatch), checks.responseMatch === false ? 'error' : 'ok')}
+      ${metric('Model', statusMarkText(checks.modelMatch), checks.modelMatch === false ? 'error' : 'ok')}
+      ${metric('Tools', statusMarkText(checks.responseToolMatch), checks.responseToolMatch === false ? 'error' : 'ok')}
+      ${metric('Confidence', turn.verification ? `${Math.round((turn.verification.confidence || 0) * 100)}%` : '-', turn.status === 'ok' ? 'ok' : 'warn')}
+    </div>
+    ${renderReplayBlock('Verification Detail', turn.verification || '-')}
+  `;
+}
+
+function statusMarkText(value) {
+  if (value === true) return 'yes';
+  if (value === false) return 'no';
+  return '-';
+}
+
+async function openReplayTurn(turnIndex) {
+  document.querySelector('.tab[data-tab="workspaceD"]').click();
+  if (!state.replay.data) {
+    await loadReplay({ quiet: true, turnIndex });
+  } else {
+    selectReplayTurn(turnIndex);
+  }
 }
 
 async function convert() {
@@ -1082,6 +1374,11 @@ function bind() {
       if (button.dataset.tab === 'workspaceC' && !state.terminal.ready) {
         initTerminal();
       }
+      if (button.dataset.tab === 'workspaceD' && !state.replay.data) {
+        loadReplay({ quiet: true }).catch((err) => {
+          showToast(err.message || '回放加载失败', 'error', 3000);
+        });
+      }
     });
   });
   // 折叠面板切换
@@ -1137,6 +1434,11 @@ function bind() {
     });
   });
   $('runVerify').addEventListener('click', wrap(runVerify, $('runVerify')));
+  $('loadReplay').addEventListener('click', wrap(loadReplay, $('loadReplay')));
+  $('replayOnlyProblems').addEventListener('change', () => {
+    state.replay.onlyProblems = $('replayOnlyProblems').checked;
+    renderReplay();
+  });
   $('convert').addEventListener('click', wrap(convert, $('convert')));
   $('loadTrajectory').addEventListener('click', wrap(loadTrajectory, $('loadTrajectory')));
   $('downloadTrajectory').addEventListener('click', () => { downloadFile('trajectory.jsonl'); showToast('下载中', 'info'); });

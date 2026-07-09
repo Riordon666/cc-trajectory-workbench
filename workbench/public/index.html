@@ -14,8 +14,8 @@
       <div class="topbar-bg"></div>
       <div class="topbar-content">
         <div>
-          <h1>Claude Code Trajectory Workbench <span class="version-badge">v3.1 release</span></h1>
-          <p>工作区 A 采集验证，工作区 B 转换为 SOP 交付 JSONL。</p>
+          <h1>Claude Code Trajectory Workbench <span class="version-badge">v0.4</span></h1>
+          <p>工作区 A 采集验证，B 转换 SOP，C 内置终端，D 轨迹回放调试。</p>
         </div>
         <div class="topbar-actions">
           <div class="theme-wrapper">
@@ -88,6 +88,7 @@
           <button class="tab active" data-tab="workspaceA">工作区 A：采集验证</button>
           <button class="tab" data-tab="workspaceB">工作区 B：SOP 转换</button>
           <button class="tab" data-tab="workspaceC">工作区 C：终端</button>
+          <button class="tab" data-tab="workspaceD">工作区 D：轨迹回放</button>
         </nav>
 
         <section id="workspaceA" class="tab-panel active">
@@ -218,6 +219,42 @@
             </div>
             <div id="terminalContainer" style="flex:1;min-height:300px;border-radius:8px;overflow:hidden"></div>
           </section>
+        </section>
+
+        <section id="workspaceD" class="tab-panel">
+          <section class="panel">
+            <div class="panel-head replay-head">
+              <div>
+                <h2>轨迹回放调试器</h2>
+                <p class="hint">按轮次查看 Claude History、代理请求、验证结果和 SOP trajectory 的对齐状态。</p>
+              </div>
+              <div class="actions compact replay-actions">
+                <label class="replay-filter"><input id="replayOnlyProblems" type="checkbox"> 只看注意项</label>
+                <button id="loadReplay" class="primary"><span class="btn-icon">↻</span>加载回放</button>
+              </div>
+            </div>
+            <div class="metrics" id="replayMetrics"></div>
+          </section>
+
+          <div class="replay-layout">
+            <section class="panel replay-timeline-panel">
+              <h2>时间线</h2>
+              <div id="replayTimeline" class="replay-timeline"></div>
+            </section>
+
+            <section class="panel replay-detail-panel">
+              <div class="panel-head">
+                <h2 id="replayDetailTitle">选择一个轮次</h2>
+                <span class="hint inline" id="replayDetailMeta"></span>
+              </div>
+              <div id="replayDetail" class="replay-detail"></div>
+            </section>
+
+            <section class="panel replay-diagnostics-panel">
+              <h2>诊断</h2>
+              <div id="replayDiagnostics" class="replay-diagnostics"></div>
+            </section>
+          </div>
         </section>
       </section>
     </main>
