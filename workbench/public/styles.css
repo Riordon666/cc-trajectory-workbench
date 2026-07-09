@@ -359,8 +359,14 @@ p { margin: 6px 0 0; color: var(--muted); font-size: 13px; }
 .panel-head {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 12px;
+  margin-bottom: 8px;
+}
+.panel-head h2 {
+  flex-shrink: 0;
+}
+.panel-head .actions {
+  margin-left: auto;
 }
 
 .grid.two {
@@ -748,7 +754,7 @@ button.proxy-btn-tall.disabled {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin: 8px 0 12px;
+  margin: 0;
 }
 
 .metric {
@@ -764,6 +770,51 @@ button.proxy-btn-tall.disabled {
 .metric.error { border-color: #e0a0a0; color: var(--danger); background: #fdeaea; }
 .metric.warn { border-color: #e6c98a; color: var(--warn); background: #fdf5e6; }
 .metric.ok { border-color: #9ad0b5; color: var(--ok); background: #ecf6f0; }
+
+/* ===== Toolbar Row ===== */
+.toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.filter-bar select {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  min-width: 130px;
+}
+.filter-input {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1.5px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--text);
+  width: 220px;
+  outline: none;
+}
+.filter-input:focus {
+  border-color: var(--accent);
+}
+.filter-input::placeholder {
+  color: var(--muted);
+}
+.filter-count {
+  font-size: 11px;
+  color: var(--muted);
+  margin-left: auto;
+  white-space: nowrap;
+}
 
 /* ===== Table ===== */
 .table-wrap {

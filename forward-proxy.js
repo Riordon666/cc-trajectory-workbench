@@ -256,7 +256,7 @@ function handleMITMRequest(clientReq, clientRes, targetHost) {
     proxyReq.on('error', (err) => {
       console.error(`❌ 转发错误: ${err.message}`);
       clientRes.writeHead(502);
-      clientRes.end('Proxy Error');
+      clientRes.end('代理错误');
     });
 
     if (requestBody) {
@@ -363,7 +363,7 @@ server.on('connect', (req, clientSocket, head) => {
 
   if (shouldIntercept) {
     // ── MITM 模式 ──
-    console.log(`🔍 [MITM] CONNECT ${req.url}`);
+    console.log(`🔍 [MITM 拦截] CONNECT ${req.url}`);
 
     // 告诉客户端隧道已建立
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
@@ -407,17 +407,17 @@ server.on('connect', (req, clientSocket, head) => {
 
 server.listen(PROXY_PORT, () => {
   console.log(`\n🚀 正向代理运行在 http://localhost:${PROXY_PORT}`);
-  console.log(`🎯 MITM 拦截: ${TARGET_HOST || '所有 HTTPS 请求'}`);
+  console.log(`🎯 MITM 拦截目标: ${TARGET_HOST || '所有 HTTPS 请求'}`);
   if (TARGET_HOST) {
     console.log(`🔀 其它域名: 直接透传`);
   }
-  console.log(`\n📋 在另一个终端执行以下命令启动 VS Code（Cline）:`);
+  console.log(`\n📋 在另一个终端执行以下命令通过代理启动 Claude Code:`);
   console.log(`  export HTTP_PROXY=http://localhost:${PROXY_PORT}`);
   console.log(`  export HTTPS_PROXY=http://localhost:${PROXY_PORT}`);
   console.log(`  export NODE_EXTRA_CA_CERTS=${path.join(CERT_DIR, 'cert.pem')}`);
   console.log(`  export NODE_TLS_REJECT_UNAUTHORIZED=0`);
-  console.log(`  code .`);
-  console.log(`\n⚠️  必须从终端启动 VS Code，不能从 Dock/Spotlight 打开，否则环境变量不生效`);
+  console.log(`  claude --permission-mode bypassPermissions`);
+  console.log(`\n⚠️  必须从终端启动，不能从快捷方式打开，否则环境变量不生效`);
   if (TARGET_HOST) {
     console.log(`\n💡 当前仅拦截: ${TARGET_HOST}`);
   } else {
@@ -432,10 +432,12 @@ setInterval(() => {
   if (INTERCEPTS.length > 0) saveData();
 }, 3000);
 
-// 优雅关闭
-process.on('SIGINT', () => {
-  console.log('\n\n正在关闭...');
+// 优雅关闭 — SIGINT (Unix/macOS), SIGTERM (Windows fallback)
+function gracefulShutdown(signal) {
+  console.log(`\n\n正在关闭... (收到 ${signal})`);
   if (INTERCEPTS.length > 0) saveData();
   server.close();
   process.exit(0);
-});
+}
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
