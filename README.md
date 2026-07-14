@@ -1,6 +1,4 @@
 <h1 align="center">Claude Code Trajectory Workbench <sup><small>v0.4</small></sup></h1>
-<!-- 可爱的装饰线 -->
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=200&section=header&text=Claude%20Code%20Trajectory%20Workbench&fontSize=40&fontAlignY=35&animation=twinkling&fontColor=fff" />
 
 <p align="center">
   <img src="https://img.shields.io/badge/Node.js-v18%2B-brightgreen?logo=nodedotjs" alt="Node.js">
@@ -10,7 +8,6 @@
 
 <p align="center">MITM 正向代理 + Web 工作台 + 内置终端 + 轨迹回放调试器，用于采集 Claude Code 编程轨迹数据，验证抓包完整性，并输出符合 SOP 规范的交付文件。</p>
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 环境要求
 
@@ -18,7 +15,6 @@
 - 操作系统：Windows / macOS / Linux 均可
 - **npm 依赖**：`ws`（WebSocket）、`node-pty`（伪终端）、`adm-zip`（打包导出），其余使用 Node 内置模块
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 首次使用
 
@@ -39,7 +35,6 @@ npm run workbench -- 5180
 # http://127.0.0.1:5177
 ```
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 工作流程
 
@@ -59,8 +54,6 @@ npm run workbench -- 5180
 | 工作区 C：终端 | 在浏览器内使用 Git Bash / PowerShell / CMD，一键带代理启动 Claude Code |
 | 工作区 D：轨迹回放 | 按轮次对齐 Claude History、代理请求、验证结果和 SOP trajectory，定位额外请求、失败项和注意项 |
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
-
 ## 界面预览
 
 | 工作台全景 | 抓包数据 |
@@ -71,7 +64,6 @@ npm run workbench -- 5180
 |---|---|---|
 | [![内置终端](docs/screenshots/terminal.png)](docs/screenshots/terminal.png) | [![验证结果](docs/screenshots/verification.png)](docs/screenshots/verification.png) | [![质检报告](docs/screenshots/qc-report.png)](docs/screenshots/qc-report.png) |
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 文件结构
 
@@ -101,7 +93,6 @@ npm run workbench -- 5180
 └── package.json
 ```
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 命令说明
 
@@ -112,7 +103,6 @@ npm run workbench -- 5180
 | `npm run proxy` | 单独启动代理（CLI 模式） |
 | `npm run verify` | CLI 验证脚本 |
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 注意事项
 
@@ -120,7 +110,6 @@ npm run workbench -- 5180
 - 代理环境变量只在执行命令的终端内生效，开新终端即失效
 - 代理未启动时，直接 `claude` 命令不受影响，可正常使用
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## 贡献者
 
@@ -128,7 +117,6 @@ npm run workbench -- 5180
   <img src="https://contrib.rocks/image?repo=Riordon666/claude-trajectory-workbench" />
 </a>
 
-<img src="https://capsule-render.vercel.app/api?type=waving&color=gradient&customColorList=6,11,20&height=100&section=header" />
 
 ## Star History
 
