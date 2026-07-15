@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose a focused improvement or adapter.
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What local observability, replay, or debugging problem should be solved?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocol or Agent format evidence
+      description: Describe structural evidence only. Do not attach a real Session.
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Project constraints
+      options:
+        - label: The proposal remains local-first and adds no telemetry or account requirement.
+          required: true
+        - label: The proposal does not infer or fabricate missing reasoning.
+          required: true

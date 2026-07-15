@@ -3,9 +3,9 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Claude Code Trajectory Workbench</title>
+    <title>Agent Trace Workbench</title>
     <link rel="stylesheet" href="/styles.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+    <link rel="stylesheet" href="/vendor/xterm/xterm.css">
   </head>
   <body>
     <div id="particleLayer"></div>
@@ -14,8 +14,8 @@
       <div class="topbar-bg"></div>
       <div class="topbar-content">
         <div>
-          <h1>Claude Code Trajectory Workbench <span class="version-badge">v0.4</span></h1>
-          <p>工作区 A 采集验证，B 转换 SOP，C 内置终端，D 轨迹回放调试。</p>
+          <h1>Agent Trace Workbench <span class="version-badge">v0.1.0</span></h1>
+          <p>Local-first observability and replay debugger for coding agents.</p>
         </div>
         <div class="topbar-actions">
           <div class="theme-wrapper">
@@ -85,18 +85,22 @@
 
       <section class="content">
         <nav class="tabs">
-          <button class="tab active" data-tab="workspaceA">工作区 A：采集验证</button>
-          <button class="tab" data-tab="workspaceB">工作区 B：SOP 转换</button>
-          <button class="tab" data-tab="workspaceC">工作区 C：终端</button>
-          <button class="tab" data-tab="workspaceD">工作区 D：轨迹回放</button>
+          <button class="tab active" data-tab="workspaceA">A：Live Capture</button>
+          <button class="tab" data-tab="workspaceB">B：Session Explorer</button>
+          <button class="tab" data-tab="workspaceC">C：Terminal</button>
+          <button class="tab" data-tab="workspaceD">D：Replay &amp; Diagnostics</button>
         </nav>
 
         <section id="workspaceA" class="tab-panel active">
           <div class="grid two">
             <section class="panel">
-              <h2>代理配置 <span class="hint inline" id="certHint"></span></h2>
+              <h2>Capture 配置 <span class="hint inline" id="certHint"></span></h2>
               <div class="proxy-layout">
                 <div class="proxy-inputs">
+                  <label>捕获模式<select id="captureMode"><option value="gateway">Gateway（默认）</option><option value="legacy-mitm">Advanced / Legacy MITM</option></select></label>
+                  <label>Agent<select id="agentAdapter"><option value="unknown">Unknown / API only</option><option value="claude-code">Claude Code</option><option value="codex-cli">Codex CLI</option></select></label>
+                  <label>协议<select id="protocolAdapter"><option value="anthropic-messages">Anthropic Messages API</option><option value="openai-responses">OpenAI Responses API</option></select></label>
+                  <label>Local Base URL<input id="gatewayBaseUrl" readonly value="http://127.0.0.1:5177/gateway/anthropic"></label>
                   <label>代理端口<input id="proxyPort" type="number" value="8888" class="input-sm" style="width:60%"></label>
                   <label>TARGET_HOST<input id="targetHost" placeholder="留空则拦截全部" class="input-sm" style="width:60%"></label>
                 </div>
@@ -110,17 +114,24 @@
                 <span class="proxy-cmd-group shell-ps"><button id="copyPSCommand" class="btn-sm"><span class="btn-icon">▶</span>在 PowerShell 终端启动</button><button id="copyPSOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
                 <span class="proxy-cmd-group shell-cmd"><button id="copyCMDCommand" class="btn-sm"><span class="btn-icon">▶</span>在 CMD 终端启动</button><button id="copyCMDOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
               </div>
+              <div class="actions" style="margin-top:10px">
+                <button id="runCapturePreflight"><span class="btn-icon">✓</span>连接诊断</button>
+                <button id="startOfficialCapture" class="primary"><span class="btn-icon">●</span>开始录制</button>
+                <button id="stopOfficialCapture" class="btn-danger-light"><span class="btn-icon">■</span>停止录制</button>
+                <span id="officialCaptureState" class="hint inline">状态：未开始</span>
+              </div>
+              <div id="preflightState" class="hint" style="margin-top:8px">连接诊断是非阻断的；即使有 warning，仍可查看自己的 Session。</div>
             </section>
 
             <section class="panel">
               <h2>Session 数据管理</h2>
               <p class="hint">
-                ⌕ 从 Claude Code 历史导入 —— 扫描并导入 Claude Code 本地记录<br>
+                ⌕ 从 Agent History 导入 —— 支持 Claude Code 和 Codex CLI<br>
                 ↺ 清除工作台显示 —— 重置界面，不删除 Session 文件
               </p>
               <div class="metrics" id="dataStatusMetrics"></div>
               <div class="actions">
-                <button id="scanHistories" class="primary"><span class="btn-icon">⌕</span>从 Claude Code 历史导入</button>
+                <button id="scanHistories" class="primary"><span class="btn-icon">⌕</span>从 Agent History 导入</button>
                 <button id="clearHistory" class="btn-danger-light"><span class="btn-icon">✕</span>历史导入错了？点我清除历史文件</button>
                 <button id="clearSession" class="btn-danger-light"><span class="btn-icon">↺</span>清除工作台显示</button>
               </div>
@@ -133,7 +144,7 @@
               <div class="metrics" id="captureMetrics"></div>
               <div class="actions compact">
                 <button id="loadIntercepts" class="primary"><span class="btn-icon">↻</span>刷新抓包</button>
-                <button id="runVerify" class="primary"><span class="btn-icon">✓</span>运行验证</button>
+                <button id="runVerify" class="primary"><span class="btn-icon">✓</span>运行 Diagnostics</button>
               </div>
             </div>
             <div class="toolbar-row" id="interceptToolbar" style="display:none">
@@ -165,7 +176,7 @@
           </section>
 
           <section class="panel">
-            <h2>验证结果</h2>
+            <h2>Diagnostics（非阻断）</h2>
             <div class="metrics" id="verifyMetrics"></div>
             <div class="verify-table" id="verifyTable"></div>
             <pre class="result" id="verifyResult"></pre>
@@ -174,35 +185,25 @@
 
         <section id="workspaceB" class="tab-panel">
           <section class="panel">
-            <h2>交付元数据</h2>
-            <div class="form-grid">
-              <label>Instance ID（实例ID）<input id="instanceId" placeholder="留空自动生成"></label>
-              <label>Task ID（任务ID）<input id="taskId" placeholder="留空自动生成"></label>
-              <label>Model（模型）
-                <select id="model">
-                  <option value="">留空自动映射</option>
-                  <option value="claude-opus-4-6">claude-opus-4-6</option>
-                  <option value="claude-opus-4-8">claude-opus-4-8</option>
-                </select>
-              </label>
-              <label>Language（编程语言）<input id="language" placeholder="留空自动检测"></label>
-              <label>Repo（代码仓库）<input id="repo" placeholder="必填，例如 https://github.com/owner/repo"></label>
-              <label>Base Commit（基准提交） <span style="margin-left:24px;font-size:11px;color:var(--muted)">在对应仓库目录命令行中执行：<code id="baseCommitCmd" style="display:inline-block;background:#f0edf2;border:1px solid #d8d0dc;border-radius:4px;padding:2px 8px;font-family:Consolas,monospace;font-size:11px;color:#5a5a6a">git rev-parse HEAD</code> <button id="copyBaseCommitCmd" class="btn-sm" style="padding:1px 6px;font-size:10px"><span class="btn-icon">⧉</span>复制</button></span> <input id="baseCommit" placeholder="必填，例如 abc1234"></label>
-            </div>
-            <label>Problem Statement（问题描述）<textarea id="problemStatement" rows="4" placeholder="必填，描述要解决的 SWE 任务"></textarea></label>
-            <label>Summary CoT（思维链摘要）<textarea id="summaryCot" rows="4" placeholder="留空自动生成草稿，可再人工修订"></textarea></label>
+            <h2>Session Explorer</h2>
+            <p class="hint">从左侧选择 Session，查看抓取记录、Agent History、哈希完整性和可用的 reasoning。Agent 未提供 reasoning 时会明确显示 unavailable，不会生成或推测 reasoning。</p>
+            <div class="metrics" id="explorerMetrics"></div>
             <div class="actions">
-              <button id="convert" class="primary"><span class="btn-icon">✦</span>生成 SOP JSONL + 质检</button>
-              <button id="loadTrajectory" class="primary"><span class="btn-icon">◉</span>查看 trajectory.jsonl</button>
-              <button id="exportZip" class="primary"><span class="btn-icon">📦</span>一键打包并下载 trajectory.jsonl 和 instance.json</button>
+              <button id="refreshExplorer" class="primary"><span class="btn-icon">↻</span>刷新 Session</button>
+              <button id="explorerReplay"><span class="btn-icon">▶</span>在回放器中打开</button>
+              <button id="exportEvents">导出 events.jsonl</button>
+              <button id="exportBundle">导出 Session Bundle</button>
+              <input id="bundleFileInput" type="file" accept=".zip" hidden>
+              <button id="importBundle">导入 Session Bundle</button>
             </div>
           </section>
-
           <section class="panel">
-            <h2>质检报告</h2>
-            <div class="metrics" id="qcMetrics"></div>
-            <div class="qc-list" id="qcDetails"></div>
-            <pre class="result" id="deliveryPreview"></pre>
+            <h2>当前 Session 文件</h2>
+            <pre class="result" id="explorerPreview">选择 Session 后显示概览。</pre>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>通用事件</h2><select id="eventTypeFilter"><option value="">全部事件</option></select></div>
+            <div id="eventList" class="replay-diagnostics"></div>
           </section>
         </section>
 
@@ -233,7 +234,7 @@
             <div class="panel-head replay-head">
               <div>
                 <h2>轨迹回放调试器</h2>
-                <p class="hint">按轮次查看 Claude History、代理请求、验证结果和 SOP trajectory 的对齐状态。</p>
+                <p class="hint">按轮次查看 Agent History、协议请求和非阻断 Diagnostics 的对齐状态。</p>
               </div>
               <div class="actions compact replay-actions">
                 <label class="replay-filter"><input id="replayOnlyProblems" type="checkbox"> 只看注意项</label>
@@ -300,9 +301,9 @@
       </div>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/xterm-addon-webgl@0.16.0/lib/xterm-addon-webgl.js"></script>
+    <script src="/vendor/xterm/xterm.js"></script>
+    <script src="/vendor/xterm/xterm-addon-fit.js"></script>
+    <script src="/vendor/xterm/xterm-addon-webgl.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>

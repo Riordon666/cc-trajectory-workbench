@@ -10,6 +10,9 @@ const state = {
   sortDir: 'asc',
   terminal: { term: null, ws: null, fit: null, ready: false, connecting: false, shell: '', currentShell: '', cwd: '' },
   replay: { data: null, selected: null, onlyProblems: false },
+  gateway: null,
+  events: [],
+  certReady: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -45,7 +48,7 @@ async function api(path, options = {}) {
 }
 
 function metric(label, value, cls = '') {
-  return `<span class="metric ${cls}">${label}: ${value}</span>`;
+  return `<span class="metric ${cls}">${escapeHtml(label)}: ${escapeHtml(value)}</span>`;
 }
 
 function renderMetrics(el, entries) {
@@ -93,6 +96,22 @@ function tokenText(tokens) {
   return reasoning ? `${prompt}/${completion}/${reasoning}` : `${prompt}/${completion}`;
 }
 
+function updateCertHint() {
+  const certHint = $('certHint');
+  if (!certHint) return;
+  const legacy = $('captureMode')?.value === 'legacy-mitm';
+  if (!legacy) {
+    certHint.textContent = 'Gateway 模式无需证书';
+    certHint.className = 'hint inline ok';
+  } else if (state.certReady) {
+    certHint.textContent = 'MITM 证书已就绪';
+    certHint.className = 'hint inline ok';
+  } else {
+    certHint.textContent = 'MITM 证书缺失，请运行 npm run setup';
+    certHint.className = 'hint inline bad';
+  }
+}
+
 /* ===== Log highlight ===== */
 function highlightLog(line) {
   let s = escapeHtml(line);
@@ -110,22 +129,15 @@ async function refreshStatus() {
   state.sessions = status.sessions;
   state.proxyRunning = status.proxyRunning;
   state.certPath = status.certs.certPath || '';
+  state.certReady = Boolean(status.certs.certExists && status.certs.keyExists);
+  state.gateway = status.gateway || null;
   state.picDir = (status.certs && status.certs.picDir) ? status.certs.picDir : '';
   const proxy = $('proxyStatus');
   proxy.textContent = status.proxyRunning ? '◉ 代理运行中' : '○ 代理已停止';
   proxy.classList.toggle('running', status.proxyRunning);
   proxy.classList.toggle('stopped', !status.proxyRunning);
   setProxyButtonState(status.proxyRunning);
-  const certHint = $('certHint');
-  if (certHint) {
-    if (status.certs.certExists && status.certs.keyExists) {
-      certHint.textContent = '证书已就绪';
-      certHint.className = 'hint inline ok';
-    } else {
-      certHint.textContent = '证书缺失，请运行 node setup-https-proxy.js';
-      certHint.className = 'hint inline bad';
-    }
-  }
+  updateCertHint();
   // 日志自动滚到底部
   const logEl = $('logs');
   const wasAtBottom = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 10;
@@ -140,8 +152,7 @@ async function refreshStatus() {
     const badges = [];
     if (s.hasIntercepts) badges.push('⬇');   // ⬇ 抓包
     if (s.hasHistory) badges.push('📜'); // 📜 历史
-    if (s.hasVerification) badges.push('🔍'); // 🔍 验证
-    if (s.hasDelivery) badges.push('✅');      // ✅ 交付
+    if (s.hasDiagnostics) badges.push('🔍');
     const suffix = badges.length ? `  ·  ${badges.join(' ')}` : '';
     return `<option value="${s.id}">${escapeHtml(s.name)}${suffix}</option>`;
   }).join('');
@@ -172,14 +183,17 @@ async function refreshSession() {
   }
   const overview = await api(`/api/sessions/${id}`);
   state.currentOverview = overview;
+  if (overview.captureMode && overview.state !== 'recording') $('captureMode').value = overview.captureMode;
+  if (overview.agent && [...$('agentAdapter').options].some((option) => option.value === overview.agent)) $('agentAdapter').value = overview.agent;
+  updateCaptureControls();
   const fileIcons = {
     'config.json':              { icon: '⚙', label: '配置' },
+    'events.jsonl':             { icon: '📄', label: '统一事件' },
+    'gateway-capture.jsonl':    { icon: '📄', label: '网关抓取' },
+    'agent-history.jsonl':      { icon: '📄', label: 'Agent 历史' },
     'https-intercepts.json':    { icon: '⬇', label: '抓包' },
     'claude-history.jsonl':     { icon: '📜', label: '历史' },
-    'verification-result.json': { icon: '🔍', label: '验证' },
-    'instance.json':            { icon: '📋', label: '实例' },
-    'trajectory.jsonl':         { icon: '📊', label: '轨迹' },
-    'qc-report.json':           { icon: '✅', label: '质检' },
+    'diagnostics-result.json':  { icon: '🔍', label: 'Diagnostics' },
   };
   $('sessionFiles').innerHTML = overview.files.map((f) => {
     const meta = fileIcons[f.name] || { icon: '📄', label: f.name };
@@ -189,12 +203,15 @@ async function refreshSession() {
     const status = `<span class="file-status"><span class="${dotCls}"></span><span class="file-size">${sizeText}</span></span>`;
     return `<div class="${cls}">
       <span class="file-icon">${meta.icon}</span>
-      <span class="file-label">${meta.label}</span>
-      <span class="file-name">${escapeHtml(f.name)}</span>
+      <span class="file-main">
+        <span class="file-label">${meta.label}</span>
+        <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+      </span>
       ${status}
     </div>`;
   }).join('');
   $('sessionSummary').innerHTML = renderSessionSummary(overview);
+  renderOfficialCaptureState(overview);
   // Session 数据管理面板的状态速览
   const statusMetrics = [];
   if (overview.interceptSummary) {
@@ -213,30 +230,154 @@ async function refreshSession() {
   } else {
     statusMetrics.push(['对话轮次', '未导入', '']);
   }
-  const hasVerification = overview.files?.find((f) => f.name === 'verification-result.json')?.exists;
-  const hasDelivery = ['instance.json', 'trajectory.jsonl'].every((name) =>
-    overview.files?.find((f) => f.name === name)?.exists
-  );
+  const hasDiagnostics = overview.files?.find((f) => f.name === 'diagnostics-result.json')?.exists;
   statusMetrics.push(
-    ['验证', hasVerification ? '已完成' : '未验证', hasVerification ? 'ok' : ''],
-    ['交付', hasDelivery ? '已生成' : '未生成', hasDelivery ? 'ok' : ''],
+    ['Diagnostics', hasDiagnostics ? '已运行' : '未运行', hasDiagnostics ? 'ok' : ''],
   );
   renderMetrics($('dataStatusMetrics'), statusMetrics);
 
   if (overview.interceptSummary) {
+    const eligibility = overview.captureEligibility || {};
+    const modelText = eligibility.models?.join(', ') || '未识别';
     renderMetrics($('captureMetrics'), [
-      ['成功对话请求', overview.interceptSummary.successfulRequests, 'ok'],
+      ['正式请求', eligibility.proxyRounds ?? overview.interceptSummary.successfulRequests, eligibility.proxyRounds ? 'ok' : 'warn'],
+      ['协议 Reasoning', eligibility.reasoningAvailability || 'unavailable', eligibility.proxyReasoningRounds ? 'ok' : 'warn'],
+      ['History Thinking', `${eligibility.clientThinkingRounds || 0}/${eligibility.clientRounds || 0}`, eligibility.clientThinkingRounds ? 'ok' : 'warn'],
+      ['模型', modelText, eligibility.modelConsistent ? 'ok' : 'warn'],
+      ['进行中请求', eligibility.activeRequests || 0, eligibility.activeRequests ? 'warn' : 'ok'],
       ['失败请求', overview.interceptSummary.failedRequests, overview.interceptSummary.failedRequests ? 'warn' : 'ok'],
-      ['总抓包', overview.interceptSummary.totalInterceptions, ''],
-      ['目标 Host', overview.interceptSummary.targetHost || '*', ''],
+      ['诊断', '始终可用', 'ok'],
     ]);
   }
-  loadMetadataDraft();
+  renderSessionExplorer(overview);
   if (document.querySelector('#workspaceD.active') && (!state.replay.data || state.replay.data.sessionId !== id)) {
     loadReplay({ quiet: true }).catch((err) => {
       showToast(err.message || '回放加载失败', 'error', 3000);
     });
   }
+}
+
+function renderOfficialCaptureState(overview) {
+  const stateName = overview.state || 'draft';
+  const start = $('startOfficialCapture');
+  const stop = $('stopOfficialCapture');
+  const label = $('officialCaptureState');
+  const preflightButton = $('runCapturePreflight');
+  const preflightLabel = $('preflightState');
+  if (!start || !stop || !label || !preflightButton || !preflightLabel) return;
+  const recording = stateName === 'recording';
+  const captureMode = $('captureMode')?.value || overview.captureMode || 'gateway';
+  preflightButton.disabled = recording;
+  start.disabled = recording || (captureMode === 'legacy-mitm' && !state.proxyRunning);
+  stop.disabled = !recording;
+  const check = overview.connectionCheck;
+  preflightLabel.textContent = check
+    ? `连接诊断：${check.passed ? '正常' : '有提示（非阻断）'} · ${check.model || '模型未观察到'}`
+    : '连接诊断：尚未运行（非阻断）';
+  preflightLabel.className = `hint ${check?.passed ? 'ok' : check ? 'bad' : ''}`;
+  label.textContent = recording
+    ? `状态：录制中（起始 #${overview.recording?.startInterceptId ?? 0}）`
+    : stateName === 'recorded'
+      ? `状态：已停止（#${overview.recording?.startInterceptId ?? 0} → #${overview.recording?.endInterceptId ?? 0}）`
+      : '状态：未开始';
+  label.className = `hint inline ${recording ? 'bad' : stateName === 'recorded' ? 'ok' : ''}`;
+}
+
+async function runCapturePreflight() {
+  const result = await api(`/api/sessions/${currentSessionId()}/connection-check`, { method: 'POST', body: '{}' });
+  await refreshSession();
+  if (!result.passed) {
+    const failed = Object.entries(result.checks || {}).filter(([, passed]) => !passed).map(([name]) => name).join(', ');
+    showToast(`连接诊断提示（非阻断）：${failed}`, 'warn');
+    return;
+  }
+  showToast(`连接诊断正常：${result.model || '等待请求'}`, 'success');
+}
+
+async function startOfficialCapture() {
+  await api(`/api/sessions/${currentSessionId()}/recording-start`, { method: 'POST', body: JSON.stringify({ captureMode: $('captureMode').value, agent: $('agentAdapter').value }) });
+  await refreshStatus();
+  showToast('Session 录制已开始', 'success');
+}
+
+async function stopOfficialCapture() {
+  await api(`/api/sessions/${currentSessionId()}/recording-stop`, { method: 'POST', body: '{}' });
+  await refreshStatus();
+  showToast('Session 录制已停止', 'success');
+}
+
+function renderSessionExplorer(overview) {
+  const metrics = $('explorerMetrics');
+  const preview = $('explorerPreview');
+  if (!metrics || !preview) return;
+  const d = overview.eventSummary || {};
+  renderMetrics(metrics, [
+    ['Agent', overview.agent || 'unknown', overview.agent && overview.agent !== 'unknown' ? 'ok' : 'warn'],
+    ['通用事件', d.total || 0, ''],
+    ['Provider', (d.providers || []).join(', ') || 'unknown', ''],
+    ['Reasoning', d.reasoning || 'unavailable', d.reasoning === 'available' ? 'ok' : 'warn'],
+  ]);
+  preview.textContent = JSON.stringify({
+    session: overview.id,
+    state: overview.state,
+    files: overview.files,
+    captureMode: overview.captureMode,
+    agent: overview.agent,
+    providers: d.providers || [],
+    models: d.models || [],
+    eventTypes: d.types || {},
+    eventsSha256: d.sha256 || null,
+    reasoning: d.reasoning || 'unavailable',
+  }, null, 2);
+  loadEvents().catch(() => {});
+}
+
+function updateCaptureControls() {
+  const mode = $('captureMode').value;
+  const protocol = $('protocolAdapter').value;
+  const endpoint = state.gateway?.endpoints?.find((item) => item.protocol === protocol);
+  $('gatewayBaseUrl').value = endpoint?.base_url || `http://127.0.0.1:5177/gateway/${protocol === 'openai-responses' ? 'openai' : 'anthropic'}`;
+  const legacy = mode === 'legacy-mitm';
+  updateCertHint();
+  for (const id of ['proxyPort', 'targetHost', 'startProxy', 'stopProxy', 'copyBashCommand', 'copyBashOnly', 'copyPSCommand', 'copyPSOnly', 'copyCMDCommand', 'copyCMDOnly']) {
+    const element = $(id);
+    if (element) element.disabled = !legacy;
+  }
+  if (state.currentOverview) renderOfficialCaptureState(state.currentOverview);
+}
+
+async function loadEvents() {
+  if (!state.currentSession) return;
+  const type = $('eventTypeFilter')?.value || '';
+  const data = await api(`/api/sessions/${currentSessionId()}/events${type ? `?type=${encodeURIComponent(type)}` : ''}`);
+  state.events = data.events || [];
+  const filter = $('eventTypeFilter');
+  if (filter && filter.options.length <= 1) {
+    const types = [...new Set(state.events.map((event) => event.event_type))].sort();
+    filter.innerHTML = '<option value="">全部事件</option>' + types.map((eventType) => `<option value="${escapeHtml(eventType)}">${escapeHtml(eventType)}</option>`).join('');
+  }
+  const list = $('eventList');
+  if (!list) return;
+  list.innerHTML = state.events.length ? state.events.slice(-300).map((event) => `<div class="diag-item ${event.event_type === 'error' ? 'error' : event.event_type === 'reasoning' ? 'info' : ''}"><span>${escapeHtml(localTime(event.timestamp))}</span> <strong>${escapeHtml(event.event_type)}</strong> <span>${escapeHtml(event.agent)} / ${escapeHtml(event.model || 'model unavailable')}</span><pre>${escapeHtml(JSON.stringify(event.content, null, 2))}</pre></div>`).join('') : emptyState('◇', `暂无通用事件 · reasoning ${data.reasoning || 'unavailable'}`);
+}
+
+async function downloadSessionFile(action, filename) {
+  const response = await fetch(`/api/sessions/${currentSessionId()}/${action}`);
+  if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `HTTP ${response.status}`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url; link.download = filename; document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+}
+
+async function importSessionBundleFile() {
+  const file = $('bundleFileInput').files[0];
+  if (!file) return;
+  const response = await fetch(`/api/sessions/${currentSessionId()}/import-bundle`, { method: 'POST', headers: { 'content-type': 'application/zip' }, body: file });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || 'Bundle import failed');
+  await refreshSession();
+  showToast(`Bundle 已导入：${data.imported.events} events`, 'success');
 }
 
 function renderSessionSummary(overview) {
@@ -288,15 +429,13 @@ async function renameSession() {
 }
 
 async function clearSession() {
-  if (!confirm('确认清除当前工作台显示的抓包数据、验证结果和交付预览？\n\n只是清空页面显示，不会删除 Session 里已保存的文件。')) return;
+  if (!confirm('确认清除当前页面的抓取和 Diagnostics 显示？\n\n不会删除 Session 里已保存的文件。')) return;
   $('interceptsTable').innerHTML = '';
   $('interceptToolbar').style.display = 'none';
   $('verifyMetrics').innerHTML = '';
   $('verifyTable').innerHTML = '';
   $('verifyResult').textContent = '';
-  $('deliveryPreview').textContent = '';
-  $('qcMetrics').innerHTML = '';
-  $('qcDetails').innerHTML = '';
+  if ($('explorerPreview')) $('explorerPreview').textContent = '';
   showToast('工作台显示已清空，文件未删除', 'success');
 }
 
@@ -694,12 +833,6 @@ function refreshInterceptTable() {
 async function loadIntercepts(options = {}) {
   const data = await api(`/api/sessions/${currentSessionId()}/intercepts`);
   state.lastInterceptRecords = data.records;
-  renderMetrics($('captureMetrics'), [
-    ['成功对话请求', data.stats.successfulRequests, 'ok'],
-    ['失败请求', data.stats.failedRequests, data.stats.failedRequests ? 'warn' : 'ok'],
-    ['总抓包', data.stats.totalInterceptions, ''],
-    ['目标 Host', data.stats.targetHost || '*', ''],
-  ]);
   refreshInterceptTable();
   if (!options.quiet) showToast('抓包数据已刷新', 'info', 1800);
 }
@@ -758,7 +891,21 @@ function progressBar(pct, good) {
 }
 
 async function runVerify() {
-  const data = await api(`/api/sessions/${currentSessionId()}/verify`, { method: 'POST', body: '{}' });
+  const data = await api(`/api/sessions/${currentSessionId()}/diagnostics`, { method: 'POST', body: '{}' });
+  if (!data.summary) {
+    renderMetrics($('verifyMetrics'), [
+      ['Status', data.status || 'ok', data.status === 'error' ? 'error' : data.status === 'warning' ? 'warn' : 'ok'],
+      ['Info', data.counts?.info || 0, ''],
+      ['Warnings', data.counts?.warning || 0, data.counts?.warning ? 'warn' : 'ok'],
+      ['Errors', data.counts?.error || 0, data.counts?.error ? 'error' : 'ok'],
+      ['Reasoning', data.stats?.reasoningEvents ? 'available' : 'unavailable', data.stats?.reasoningEvents ? 'ok' : 'warn'],
+    ]);
+    $('verifyTable').innerHTML = (data.items || []).map((item) => `<div class="diag-item ${escapeHtml(item.level)}"><strong>${escapeHtml(item.level)} · ${escapeHtml(item.code)}</strong><span>${escapeHtml(item.message)}</span></div>`).join('') || emptyState('◇', 'Diagnostics 未发现异常');
+    $('verifyResult').textContent = JSON.stringify(data, null, 2);
+    await refreshSession();
+    showToast(data.status === 'ok' ? 'Diagnostics 未发现异常 ✦' : 'Diagnostics 有提示，不影响查看或导出 Session', data.status === 'error' ? 'warn' : 'success');
+    return;
+  }
   const s = data.summary;
   const matchPct = s.clientRounds ? s.matched / s.clientRounds : 0;
   const respPct = s.matched ? s.responseOk / s.matched : 0;
@@ -768,6 +915,7 @@ async function runVerify() {
       ${progressRing(matchPct, `${s.matched}/${s.clientRounds}`, s.allGood)}
       <div class="progress-bars">
         ${metric('回复一致', `${s.responseOk}/${s.matched}`, s.responseOk === s.matched && s.matched > 0 ? 'ok' : 'error')}
+        ${metric('Reasoning 一致', `${s.reasoningOk}/${s.matched}`, s.reasoningOk === s.matched && s.matched > 0 ? 'ok' : 'error')}
         ${metric('工具一致', `${s.toolMatchOk}/${s.matched}`, s.toolMatchOk === s.matched && s.matched > 0 ? 'ok' : 'error')}
         ${metric('Thinking', s.thinking.clientThinkingRounds, s.thinking.clientThinkingRounds ? 'ok' : 'warn')}
         ${metric('失败请求', s.failedRequests, s.failedRequests ? 'warn' : 'ok')}
@@ -777,14 +925,14 @@ async function runVerify() {
   bindVerifyReplayLinks();
   $('verifyResult').textContent = JSON.stringify(data, null, 2);
   await refreshSession();
-  if (s.allGood) showToast('验证全部通过 ✦', 'success');
-  else showToast('验证未完全通过，请检查', 'warn');
+  if (data.status === 'ok') showToast('Diagnostics 未发现异常 ✦', 'success');
+  else showToast('Diagnostics 有提示，不影响查看 Session', 'warn');
 }
 
 function renderVerifyTable(data) {
   const rows = (data.details || []).map((d) => {
     const c = d.checks || {};
-    const cls = c.matched && c.responseMatch && c.modelMatch && c.responseToolMatch ? 'ok-row' : 'bad-row';
+    const cls = c.matched && c.userContentMatch && c.responseMatch && c.reasoningMatch && c.modelMatch && c.responseToolMatch ? 'ok-row' : 'bad-row';
     const replayAttr = d.clientRound !== null && d.clientRound !== undefined ? `data-replay-turn="${d.clientRound}"` : '';
     return `<tr class="${cls} ${replayAttr ? 'clickable-row' : ''}" ${replayAttr}>
       <td>${d.proxyIndex ?? '-'}</td>
@@ -792,14 +940,15 @@ function renderVerifyTable(data) {
       <td>${Math.round((d.confidence || 0) * 100)}%</td>
       <td>${statusMark(c.userContentMatch)}</td>
       <td>${statusMark(c.responseMatch)}</td>
+      <td>${statusMark(c.reasoningMatch)}</td>
       <td>${statusMark(c.modelMatch)}</td>
       <td>${statusMark(c.responseToolMatch)}</td>
       <td>${c.thinkingInfo ? `${c.thinkingInfo.clientThinkingLength || 0}/${c.thinkingInfo.proxyReasoningLength || 0}` : '-'}</td>
     </tr>`;
   }).join('');
   return `<div class="table-wrap mini-table"><table>
-    <thead><tr><th>代理</th><th>Claude</th><th>置信度</th><th>User</th><th>回复</th><th>模型</th><th>工具</th><th>思考</th></tr></thead>
-    <tbody>${rows || `<tr><td colspan="8">${emptyState('◇', '暂无验证详情')}</td></tr>`}</tbody>
+    <thead><tr><th>Gateway</th><th>Agent History</th><th>置信度</th><th>User</th><th>回复</th><th>Reasoning</th><th>模型</th><th>工具</th><th>思考长度</th></tr></thead>
+    <tbody>${rows || `<tr><td colspan="9">${emptyState('◇', '暂无验证详情')}</td></tr>`}</tbody>
   </table></div>`;
 }
 
@@ -848,9 +997,9 @@ function renderReplayMetrics(data) {
   const s = data.summary || {};
   renderMetrics($('replayMetrics'), [
     ['轮次', s.turns ?? 0, ''],
-    ['代理请求', s.proxyRequests ?? 0, ''],
-    ['匹配轮次', s.matchedTurns ?? 0, (s.matchedTurns || 0) ? 'ok' : 'warn'],
-    ['正式问题', s.problemTurns ?? 0, s.problemTurns ? 'warn' : 'ok'],
+    ['Gateway 请求', s.proxyRequests ?? 0, ''],
+    ['对齐轮次', s.matchedTurns ?? 0, (s.matchedTurns || 0) ? 'ok' : 'warn'],
+    ['注意轮次', s.problemTurns ?? 0, s.problemTurns ? 'warn' : 'ok'],
     ['额外请求', s.extraProxyWarnings ?? 0, s.extraProxyWarnings ? 'warn' : 'ok'],
     ['注意项', s.attentionItems ?? 0, s.attentionItems ? 'warn' : 'ok'],
     ['失败', s.errorTurns ?? 0, s.errorTurns ? 'error' : 'ok'],
@@ -940,7 +1089,7 @@ function replayTurnNote(turn) {
   if (firstActionable) return firstActionable.message || '';
   if (turn.status === 'ok') {
     const hasUserContextDelta = diagnostics.some((d) => d.code === 'user_mismatch');
-    return hasUserContextDelta ? '验证通过；User 仅有注入上下文差异' : '这一轮验证通过，结构完整';
+    return hasUserContextDelta ? '回放完整；User 仅有注入上下文差异' : '这一轮回放结构完整';
   }
   return diagnostics[0]?.message || '';
 }
@@ -1016,7 +1165,7 @@ function renderReplayDetail(data) {
 
   if (selected.kind === 'proxyOnly') {
     const item = data.proxyOnly[selected.index];
-    const titlePrefix = item?.status === 'warn' ? '旁路代理请求' : '未匹配代理请求';
+    const titlePrefix = item?.status === 'warn' ? '旁路 Gateway 请求' : '未匹配 Gateway 请求';
     $('replayDetailTitle').textContent = `${titlePrefix} #${item?.proxy?.seqIndex ?? '-'}`;
     $('replayDetailMeta').textContent = item?.proxy?.url || '';
     $('replayDetail').innerHTML = `
@@ -1043,7 +1192,7 @@ function renderReplayDetail(data) {
     trajectoryModel,
   };
   $('replayDetail').innerHTML = `
-    ${renderReplayCompare('Assistant 对比', 'Proxy response', turn.proxy?.responseContent || '', 'Claude History', turn.assistant?.content || '')}
+    ${renderReplayCompare('Assistant 对比', 'Gateway response', turn.proxy?.responseContent || '', 'Agent History', turn.assistant?.content || '')}
     ${renderReplayBlock('User', turn.user?.content)}
     ${turn.user?.toolResults?.length ? renderReplayBlock('Tool Results', turn.user.toolResults) : ''}
     ${renderReplayBlock('Thinking', turn.assistant?.thinking)}
@@ -1065,11 +1214,12 @@ function renderReplayDetail(data) {
     <div class="replay-checks">
       ${metric('User', statusMarkText(checks.userContentMatch), checks.userContentMatch === false ? 'error' : 'ok')}
       ${metric('Response', statusMarkText(checks.responseMatch), checks.responseMatch === false ? 'error' : 'ok')}
+      ${metric('Reasoning', statusMarkText(checks.reasoningMatch), checks.reasoningMatch === false ? 'error' : 'ok')}
       ${metric('Model', statusMarkText(checks.modelMatch), checks.modelMatch === false ? 'error' : 'ok')}
       ${metric('Tools', statusMarkText(checks.responseToolMatch), checks.responseToolMatch === false ? 'error' : 'ok')}
       ${metric('Confidence', turn.verification ? `${Math.round((turn.verification.confidence || 0) * 100)}%` : '-', turn.status === 'ok' ? 'ok' : 'warn')}
     </div>
-    ${renderReplayBlock('Verification Detail', turn.verification || '-')}
+    ${renderReplayBlock('Alignment Detail', turn.verification || '-')}
   `;
 }
 
@@ -1088,64 +1238,6 @@ async function openReplayTurn(turnIndex) {
   }
 }
 
-async function convert() {
-  const body = {
-    instance_id: $('instanceId').value.trim(),
-    task_id: $('taskId').value.trim(),
-    model: $('model').value,
-    repo: $('repo').value.trim(),
-    base_commit: $('baseCommit').value.trim(),
-    language: $('language').value.trim(),
-    problem_statement: $('problemStatement').value.trim(),
-    summary_cot: $('summaryCot').value.trim(),
-  };
-  const data = await api(`/api/sessions/${currentSessionId()}/convert`, {
-    method: 'POST',
-    body: JSON.stringify(body),
-  });
-  renderQc(data.qc);
-  $('deliveryPreview').textContent = `${JSON.stringify(data.qc, null, 2)}\n\n--- preview ---\n${data.preview}`;
-  await refreshSession();
-  if (data.qc.passed) showToast('SOP 生成并通过质检 ✦', 'success');
-  else showToast('已生成，但质检未通过', 'warn');
-}
-
-async function loadTrajectory() {
-  const text = await api(`/api/sessions/${currentSessionId()}/file?name=trajectory.jsonl`);
-  $('deliveryPreview').textContent = text;
-  $('deliveryPreview').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  showToast('trajectory.jsonl 已加载', 'success');
-}
-
-
-function renderQc(qc) {
-  renderMetrics($('qcMetrics'), [
-    ['通过', qc.passed ? 'yes' : 'no', qc.passed ? 'ok' : 'error'],
-    ['Errors', qc.errors.length, qc.errors.length ? 'error' : 'ok'],
-    ['Warnings', qc.warnings.length, qc.warnings.length ? 'warn' : 'ok'],
-  ]);
-  $('qcDetails').innerHTML = `
-    ${renderQcGroup('Errors', qc.errors, 'error')}
-    ${renderQcGroup('Warnings', qc.warnings, 'warn')}
-    ${renderQcGroup('Info', qc.info, 'info')}
-  `;
-}
-
-function renderQcGroup(title, items = [], cls = '') {
-  const rows = items.length
-    ? items.map((item) => `<li>${escapeHtml(item)}<div class="qc-help">${escapeHtml(qcHelp(item))}</div></li>`).join('')
-    : '<li>无</li>';
-  return `<div class="qc-group ${cls}"><div class="qc-title">${title}</div><ul>${rows}</ul></div>`;
-}
-
-function qcHelp(item) {
-  if (/empty cot/i.test(item)) return '重新采集或确认模型每轮 assistant 都输出 thinking/cot。';
-  if (/model/i.test(item)) return '在工作区 B 选择 SOP 允许的 claude-opus-4-6 或 claude-opus-4-8。';
-  if (/tool uses/i.test(item)) return '正式任务需要包含读文件、编辑文件、运行命令等工具调用。';
-  if (/summary_cot/i.test(item) || /Full multi-round cot/i.test(item)) return '缩短 Summary CoT，确保完整 CoT 总长度更长。';
-  if (/secret/i.test(item)) return '导出前检查并脱敏 API key、token、cookie、私钥等内容。';
-  return '';
-}
 
 function openNewSessionModal() {
   $('newSessionModal').classList.remove('hidden');
@@ -1163,15 +1255,16 @@ function openHistoryPicker() { $('historyPicker').classList.remove('hidden'); }
 function closeHistoryPicker() { $('historyPicker').classList.add('hidden'); }
 
 async function scanHistories() {
-  const data = await api('/api/claude-histories');
+  const agent = $('agentAdapter').value === 'codex-cli' ? 'codex-cli' : 'claude-code';
+  const data = await api(`/api/agent-histories?agent=${encodeURIComponent(agent)}`);
   const body = $('historyPickerBody');
   if (!data.histories.length) {
-    body.innerHTML = emptyState('⌕', '没有找到 Claude Code 历史');
+    body.innerHTML = emptyState('⌕', `没有找到 ${agent} History`);
   } else {
     body.innerHTML = data.histories.slice(0, 20).map((h) => `
       <button class="history-item" data-path="${escapeHtml(h.path)}">
-        <span>${escapeHtml(h.project)}</span>
-        <small>${escapeHtml(localTime(h.mtime))} · ${formatBytes(h.size)}</small>
+        <span>${escapeHtml(h.project || h.sessionId)}</span>
+        <small>${escapeHtml(h.formatVersion || '')} · ${escapeHtml(h.model || '')} · ${escapeHtml(localTime(h.mtime))} · ${formatBytes(h.size)}</small>
       </button>
     `).join('');
     body.querySelectorAll('.history-item').forEach((btn) => {
@@ -1179,12 +1272,11 @@ async function scanHistories() {
         if (!confirm('导入将覆盖当前 Session 的历史文件，继续吗？')) return;
         await api(`/api/sessions/${currentSessionId()}/import`, {
           method: 'POST',
-          body: JSON.stringify({ historyPath: btn.dataset.path }),
+          body: JSON.stringify({ agent, historyPath: btn.dataset.path }),
         });
         closeHistoryPicker();
         await refreshStatus();
-        await loadIntercepts();
-        showToast('历史已导入，正在自动验证…', 'success');
+        showToast(`${agent} History 已导入，正在运行 Diagnostics…`, 'success');
         try { await runVerify(); } catch {}
       });
     });
@@ -1192,41 +1284,6 @@ async function scanHistories() {
   openHistoryPicker();
 }
 
-function metadataStorageKey() {
-  return `trajectoryWorkbenchMeta:${currentSessionId()}`;
-}
-
-function saveMetadataDraft() {
-  if (!$('sessionSelect').value) return;
-  const data = {
-    instanceId: $('instanceId').value,
-    taskId: $('taskId').value,
-    model: $('model').value,
-    repo: $('repo').value,
-    baseCommit: $('baseCommit').value,
-    language: $('language').value,
-    problemStatement: $('problemStatement').value,
-    summaryCot: $('summaryCot').value,
-  };
-  localStorage.setItem(metadataStorageKey(), JSON.stringify(data));
-}
-
-function loadMetadataDraft() {
-  if (!$('sessionSelect').value) return;
-  const raw = localStorage.getItem(metadataStorageKey());
-  if (!raw) return;
-  try {
-    const data = JSON.parse(raw);
-    $('instanceId').value = data.instanceId || '';
-    $('taskId').value = data.taskId || '';
-    $('model').value = data.model || '';
-    $('repo').value = data.repo || '';
-    $('baseCommit').value = data.baseCommit || '';
-    $('language').value = data.language || '';
-    $('problemStatement').value = data.problemStatement || '';
-    $('summaryCot').value = data.summaryCot || '';
-  } catch {}
-}
 
 /* ===== Theme ===== */
 const DEFAULT_THEME = {
@@ -1461,6 +1518,15 @@ function bind() {
   $('copyCMDOnly').addEventListener('click', wrap(copyCMDOnly, $('copyCMDOnly')));
   $('startProxy').addEventListener('click', wrap(startProxyWrapped, $('startProxy')));
   $('stopProxy').addEventListener('click', wrap(stopProxy, $('stopProxy')));
+  $('runCapturePreflight').addEventListener('click', wrap(runCapturePreflight, $('runCapturePreflight')));
+  $('startOfficialCapture').addEventListener('click', wrap(startOfficialCapture, $('startOfficialCapture')));
+  $('stopOfficialCapture').addEventListener('click', wrap(stopOfficialCapture, $('stopOfficialCapture')));
+  $('captureMode').addEventListener('change', updateCaptureControls);
+  $('protocolAdapter').addEventListener('change', updateCaptureControls);
+  $('agentAdapter').addEventListener('change', () => {
+    $('protocolAdapter').value = $('agentAdapter').value === 'codex-cli' ? 'openai-responses' : 'anthropic-messages';
+    updateCaptureControls();
+  });
   $('shutdownWorkbench').addEventListener('click', shutdownWorkbench);
   $('loadIntercepts').addEventListener('click', wrap(loadIntercepts, $('loadIntercepts')));
   // 筛选控件
@@ -1500,30 +1566,13 @@ function bind() {
     state.replay.onlyProblems = $('replayOnlyProblems').checked;
     renderReplay();
   });
-  $('convert').addEventListener('click', wrap(convert, $('convert')));
-  $('loadTrajectory').addEventListener('click', wrap(loadTrajectory, $('loadTrajectory')));
-  $('exportZip').addEventListener('click', wrap(async () => {
-    const id = currentSessionId();
-    const resp = await fetch(`/api/sessions/${id}/export-zip`);
-    if (!resp.ok) {
-      const err = await resp.json().catch(() => ({ error: '下载失败' }));
-      throw new Error(err.error || `HTTP ${resp.status}`);
-    }
-    const blob = await resp.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${id}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    showToast('打包下载完成', 'success');
-  }, $('exportZip')));
-  $('copyBaseCommitCmd').addEventListener('click', () => {
-    const cmd = $('baseCommitCmd').textContent;
-    navigator.clipboard.writeText(cmd).then(() => showToast('命令已复制', 'info', 2000)).catch(() => showToast('复制失败', 'error'));
-  });
+  $('refreshExplorer').addEventListener('click', wrap(refreshSession, $('refreshExplorer')));
+  $('explorerReplay').addEventListener('click', () => document.querySelector('.tab[data-tab="workspaceD"]').click());
+  $('eventTypeFilter').addEventListener('change', wrap(loadEvents, $('eventTypeFilter')));
+  $('exportEvents').addEventListener('click', wrap(() => downloadSessionFile('export-events', `${currentSessionId()}-events.jsonl`), $('exportEvents')));
+  $('exportBundle').addEventListener('click', wrap(() => downloadSessionFile('export-bundle', `${currentSessionId()}-agent-trace.zip`), $('exportBundle')));
+  $('importBundle').addEventListener('click', () => { $('bundleFileInput').value = ''; $('bundleFileInput').click(); });
+  $('bundleFileInput').addEventListener('change', wrap(importSessionBundleFile, $('importBundle')));
   $('terminalRestart').addEventListener('click', restartTerminal);
   $('terminalReconnect').addEventListener('click', restartTerminal);
   document.querySelectorAll('.shell-btn').forEach((btn) => {
@@ -1537,10 +1586,6 @@ function bind() {
   $('closeHistoryPicker').addEventListener('click', closeHistoryPicker);
   $('historyPicker').addEventListener('click', (event) => {
     if (event.target.id === 'historyPicker') closeHistoryPicker();
-  });
-  ['instanceId', 'taskId', 'model', 'repo', 'baseCommit', 'language', 'problemStatement', 'summaryCot'].forEach((id) => {
-    $(id).addEventListener('input', saveMetadataDraft);
-    $(id).addEventListener('change', saveMetadataDraft);
   });
 }
 
@@ -1901,6 +1946,7 @@ initTheme();
 initPortrait();
 initLogScroll();
 refreshStatus().then(() => {
+  updateCaptureControls();
   if (!state.sessions.length) openNewSessionModal();
 }).catch((err) => showToast(err.message || '初始化失败', 'error', 4000));
 state.statusTimer = setInterval(() => refreshStatus().catch(() => {}), 2500);

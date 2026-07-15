@@ -14,9 +14,11 @@ const tls = require('tls');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { parseSSE } = require('./workbench/adapters/protocols');
 
 // ── 配置 ──────────────────────────────────────────────
 const PROXY_PORT = parseInt(process.env.PROXY_PORT, 10) || 8888;
+const PROXY_HOST = '127.0.0.1';
 const TARGET_HOST = (process.env.TARGET_HOST || '').replace(/^https?:\/\//, '').replace(/\/+$/, '');  // 自动去掉协议前缀和尾部斜杠
 const CERT_DIR = path.join(__dirname, 'certs');
 const RESULTS_DIR = process.env.RESULTS_DIR
@@ -26,113 +28,11 @@ const RESULTS_DIR = process.env.RESULTS_DIR
 // ── 全局状态 ──────────────────────────────────────────
 const INTERCEPTS = [];
 let interceptCount = 0;
+let activeRequests = 0;
+let shuttingDown = false;
+const RESULT_FILE = path.join(RESULTS_DIR, 'https-intercepts.json');
+const STATUS_FILE = path.join(RESULTS_DIR, 'proxy-status.json');
 
-// ── SSE 流解析 ────────────────────────────────────────
-function parseSSEResponse(raw) {
-  const lines = raw.split('\n');
-  const chunks = [];
-  let fullContent = '';
-  let reasoningContent = '';
-  let model = '';
-  let id = '';
-  let usage = null;
-  let apiFormat = 'unknown'; // 'openai' or 'anthropic'
-  const toolCalls = {}; // index -> {name, arguments}
-
-  for (const line of lines) {
-    if (!line.startsWith('data: ')) continue;
-    const payload = line.slice(6).trim();
-    if (payload === '[DONE]') continue;
-
-    try {
-      const obj = JSON.parse(payload);
-      chunks.push(obj);
-
-      // ── 检测并处理 Anthropic Messages API 格式 ────────
-      // Anthropic SSE 事件有 type 字段: message_start, content_block_start,
-      // content_block_delta, content_block_stop, message_delta, message_stop
-      if (obj.type) {
-        apiFormat = 'anthropic';
-
-        if (obj.type === 'message_start' && obj.message) {
-          model = obj.message.model || '';
-          id = obj.message.id || '';
-          if (obj.message.usage) usage = obj.message.usage;
-        }
-
-        if (obj.type === 'content_block_start' && obj.content_block) {
-          const block = obj.content_block;
-          if (block.type === 'tool_use') {
-            const idx = obj.index ?? Object.keys(toolCalls).length;
-            toolCalls[idx] = { id: block.id || '', name: block.name || '', arguments: '' };
-          }
-        }
-
-        if (obj.type === 'content_block_delta' && obj.delta) {
-          const delta = obj.delta;
-          if (delta.type === 'text_delta' && delta.text) {
-            fullContent += delta.text;
-          } else if (delta.type === 'thinking_delta' && delta.thinking) {
-            reasoningContent += delta.thinking;
-          } else if (delta.type === 'input_json_delta' && delta.partial_json) {
-            // tool_use 参数的增量
-            const idx = obj.index ?? 0;
-            if (toolCalls[idx]) toolCalls[idx].arguments += delta.partial_json;
-          }
-        }
-
-        if (obj.type === 'message_delta') {
-          if (obj.usage) {
-            // 合并 usage（Anthropic 分开发送 input/output usage）
-            usage = usage ? { ...usage, ...obj.usage } : obj.usage;
-          }
-        }
-
-        continue;
-      }
-
-      // ── OpenAI / OpenRouter 格式 ─────────────────────
-      apiFormat = 'openai';
-      if (obj.model) model = obj.model;
-      if (obj.id) id = obj.id;
-      if (obj.usage) usage = obj.usage;
-
-      if (obj.choices) {
-        for (const choice of obj.choices) {
-          const delta = choice.delta;
-          if (!delta) continue;
-          if (delta.content) fullContent += delta.content;
-          // 捕获 reasoning / thinking 内容
-          if (delta.reasoning) reasoningContent += delta.reasoning;
-          if (delta.reasoning_content) reasoningContent += delta.reasoning_content;
-          // 捕获 tool_calls
-          if (delta.tool_calls) {
-            for (const tc of delta.tool_calls) {
-              const idx = tc.index ?? 0;
-              if (!toolCalls[idx]) toolCalls[idx] = { id: '', name: '', arguments: '' };
-              if (tc.id) toolCalls[idx].id = tc.id;
-              if (tc.function?.name) toolCalls[idx].name = tc.function.name;
-              if (tc.function?.arguments) toolCalls[idx].arguments += tc.function.arguments;
-            }
-          }
-        }
-      }
-    } catch {
-      // 非 JSON 行，跳过
-    }
-  }
-
-  return {
-    id,
-    model,
-    usage,
-    content: fullContent,
-    reasoning: reasoningContent,
-    toolCalls: Object.values(toolCalls),
-    chunkCount: chunks.length,
-    apiFormat,
-  };
-}
 
 // ── 证书 ──────────────────────────────────────────────
 function loadCerts() {
@@ -159,6 +59,9 @@ function handleMITMRequest(clientReq, clientRes, targetHost) {
     const requestBody = Buffer.concat(bodyChunks).toString('utf8');
     const startTime = Date.now();
     const targetURL = new URL(clientReq.url, `https://${targetHost}`);
+    let requestSettled = false;
+    activeRequests++;
+    writeStatus();
 
     console.log(`\n→ [MITM] ${clientReq.method} https://${targetHost}${targetURL.pathname}`);
 
@@ -176,7 +79,9 @@ function handleMITMRequest(clientReq, clientRes, targetHost) {
         headers,
       },
       (proxyRes) => {
-        // 解压缩响应（gzip/deflate/br）
+        // 原始字节立即流式转发给客户端；旁路解压只用于采集，不阻塞 Claude Code。
+        clientRes.writeHead(proxyRes.statusCode, proxyRes.headers);
+        proxyRes.pipe(clientRes);
         const contentEncoding = (proxyRes.headers['content-encoding'] || '').toLowerCase();
         let responseStream = proxyRes;
         if (contentEncoding === 'gzip') {
@@ -189,22 +94,31 @@ function handleMITMRequest(clientReq, clientRes, targetHost) {
 
         const responseChunks = [];
         responseStream.on('data', (chunk) => responseChunks.push(chunk));
-
-        responseStream.on('end', () => {
+        let completed = false;
+        const finish = (captureComplete, captureError = '') => {
+          if (completed || requestSettled) return;
+          completed = true;
+          requestSettled = true;
           const responseBody = Buffer.concat(responseChunks).toString('utf-8');
           const duration = Date.now() - startTime;
-          interceptCount++;
 
           const isSSE =
             (proxyRes.headers['content-type'] || '').includes('text/event-stream');
 
           let parsedResponse;
           if (isSSE) {
-            const sse = parseSSEResponse(responseBody);
+            const sse = parseSSE(responseBody, {
+              agent: 'unknown',
+              provider: targetHost.includes('anthropic') ? 'anthropic' : '',
+              request_id: `intercept-${interceptCount + 1}`,
+            });
             parsedResponse = {
-              status: proxyRes.statusCode,
-              headers: proxyRes.headers,
+              status: captureComplete ? proxyRes.statusCode : 599,
+              upstreamStatus: proxyRes.statusCode,
+              headers: redactHeaders(proxyRes.headers),
               streaming: true,
+              captureComplete,
+              captureError,
               parsed: {
                 id: sse.id,
                 model: sse.model,
@@ -213,50 +127,68 @@ function handleMITMRequest(clientReq, clientRes, targetHost) {
                 reasoning: sse.reasoning,
                 toolCalls: sse.toolCalls,
                 chunkCount: sse.chunkCount,
+                apiFormat: sse.apiFormat,
+                events: sse.events,
               },
             };
           } else {
             parsedResponse = {
-              status: proxyRes.statusCode,
-              headers: proxyRes.headers,
+              status: captureComplete ? proxyRes.statusCode : 599,
+              upstreamStatus: proxyRes.statusCode,
+              headers: redactHeaders(proxyRes.headers),
+              captureComplete,
+              captureError,
               body: tryParse(responseBody),
             };
           }
 
           const record = {
-            id: interceptCount,
+            id: ++interceptCount,
             timestamp: new Date().toISOString(),
             method: clientReq.method,
             url: `https://${targetHost}${targetURL.pathname}${targetURL.search}`,
             path: targetURL.pathname,
             duration,
             request: {
-              headers: clientReq.headers,
-              body: tryParse(requestBody),
+              headers: redactHeaders(clientReq.headers),
+              body: redactCredentials(tryParse(requestBody)),
             },
             response: parsedResponse,
           };
 
           INTERCEPTS.push(record);
           printSummary(record);
-
-          // 转发给客户端（发送解压后的数据，去掉 content-encoding）
-          const fwdHeaders = { ...proxyRes.headers };
-          if (contentEncoding) {
-            delete fwdHeaders['content-encoding'];
-            delete fwdHeaders['content-length'];
-            fwdHeaders['transfer-encoding'] = 'chunked';
-          }
-          clientRes.writeHead(proxyRes.statusCode, fwdHeaders);
-          clientRes.end(responseBody);
-        });
+          activeRequests--;
+          saveData();
+          writeStatus();
+        };
+        responseStream.on('end', () => finish(true));
+        responseStream.on('error', (err) => finish(false, `响应采集失败: ${err.message}`));
+        proxyRes.on('aborted', () => finish(false, '上游响应在完成前中断'));
       }
     );
 
     proxyReq.on('error', (err) => {
+      if (requestSettled) return;
+      requestSettled = true;
       console.error(`❌ 转发错误: ${err.message}`);
-      clientRes.writeHead(502);
-      clientRes.end('代理错误');
+      if (!clientRes.headersSent) {
+        clientRes.writeHead(502);
+        clientRes.end('代理错误');
+      }
+      INTERCEPTS.push({
+        id: ++interceptCount,
+        timestamp: new Date().toISOString(),
+        method: clientReq.method,
+        url: `https://${targetHost}${targetURL.pathname}${targetURL.search}`,
+        path: targetURL.pathname,
+        duration: Date.now() - startTime,
+        request: { headers: redactHeaders(clientReq.headers), body: redactCredentials(tryParse(requestBody)) },
+        response: { status: 502, headers: {}, captureComplete: false, captureError: err.message, body: '' },
+      });
+      activeRequests--;
+      saveData();
+      writeStatus();
     });
 
     if (requestBody) {
@@ -317,22 +249,60 @@ function printSummary(record) {
 // ── 保存数据 ──────────────────────────────────────────
 function saveData() {
   if (!fs.existsSync(RESULTS_DIR)) fs.mkdirSync(RESULTS_DIR, { recursive: true });
+  const temp = `${RESULT_FILE}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify({
+    timestamp: new Date().toISOString(),
+    totalInterceptions: INTERCEPTS.length,
+    targetHost: TARGET_HOST || '*',
+    data: INTERCEPTS,
+  }, null, 2));
+  fs.renameSync(temp, RESULT_FILE);
+  console.log(`💾 已保存 ${INTERCEPTS.length} 条拦截 → ${RESULT_FILE}`);
+}
 
-  const filepath = path.join(RESULTS_DIR, 'https-intercepts.json');
-  fs.writeFileSync(
-    filepath,
-    JSON.stringify(
-      {
-        timestamp: new Date().toISOString(),
-        totalInterceptions: INTERCEPTS.length,
-        targetHost: TARGET_HOST || '*',
-        data: INTERCEPTS,
-      },
-      null,
-      2
-    )
-  );
-  console.log(`💾 已保存 ${INTERCEPTS.length} 条拦截 → ${filepath}`);
+function redactHeaders(headers) {
+  const sensitive = /^(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)$/i;
+  return Object.fromEntries(Object.entries(headers || {}).map(([key, value]) => [key, sensitive.test(key) ? '[REDACTED]' : value]));
+}
+
+function redactCredentials(value) {
+  if (Array.isArray(value)) return value.map(redactCredentials);
+  if (!value || typeof value !== 'object') return value;
+  const sensitive = /^(api[_-]?key|access[_-]?token|auth[_-]?token|authorization)$/i;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, sensitive.test(key) ? '[REDACTED]' : redactCredentials(item)]));
+}
+
+function writeStatus() {
+  if (!fs.existsSync(RESULTS_DIR)) fs.mkdirSync(RESULTS_DIR, { recursive: true });
+  const temp = `${STATUS_FILE}.tmp`;
+  fs.writeFileSync(temp, JSON.stringify({
+    pid: process.pid,
+    activeRequests,
+    completedInterceptions: INTERCEPTS.length,
+    shuttingDown,
+    updatedAt: new Date().toISOString(),
+  }, null, 2));
+  fs.renameSync(temp, STATUS_FILE);
+}
+
+function loadExistingData() {
+  if (!fs.existsSync(RESULT_FILE)) return;
+  try {
+    const existing = JSON.parse(fs.readFileSync(RESULT_FILE, 'utf8'));
+    for (const record of existing.data || []) {
+      if (record.request) {
+        record.request.headers = redactHeaders(record.request.headers);
+        record.request.body = redactCredentials(record.request.body);
+      }
+      if (record.response) record.response.headers = redactHeaders(record.response.headers);
+      INTERCEPTS.push(record);
+    }
+    interceptCount = Math.max(0, ...INTERCEPTS.map((record) => Number(record.id) || 0));
+    console.log(`↻ 已载入 ${INTERCEPTS.length} 条已有拦截记录`);
+  } catch (err) {
+    console.error(`❌ 无法载入已有抓包文件，拒绝覆盖: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 function tryParse(str) {
@@ -345,6 +315,8 @@ function tryParse(str) {
 
 // ── 主逻辑 ────────────────────────────────────────────
 const certs = loadCerts();
+loadExistingData();
+writeStatus();
 
 const server = http.createServer((req, res) => {
   // 普通 HTTP 请求（非 CONNECT），几乎不会走这里
@@ -405,8 +377,8 @@ server.on('connect', (req, clientSocket, head) => {
   }
 });
 
-server.listen(PROXY_PORT, () => {
-  console.log(`\n🚀 正向代理运行在 http://localhost:${PROXY_PORT}`);
+server.listen(PROXY_PORT, PROXY_HOST, () => {
+  console.log(`\n🚀 正向代理运行在 http://${PROXY_HOST}:${PROXY_PORT}`);
   console.log(`🎯 MITM 拦截目标: ${TARGET_HOST || '所有 HTTPS 请求'}`);
   if (TARGET_HOST) {
     console.log(`🔀 其它域名: 直接透传`);
@@ -427,17 +399,24 @@ server.listen(PROXY_PORT, () => {
   console.log(`\n等待请求...\n`);
 });
 
-// 定期保存
-setInterval(() => {
-  if (INTERCEPTS.length > 0) saveData();
-}, 3000);
-
 // 优雅关闭 — SIGINT (Unix/macOS), SIGTERM (Windows fallback)
 function gracefulShutdown(signal) {
   console.log(`\n\n正在关闭... (收到 ${signal})`);
-  if (INTERCEPTS.length > 0) saveData();
+  if (shuttingDown) return;
+  shuttingDown = true;
+  writeStatus();
   server.close();
-  process.exit(0);
+  const deadline = Date.now() + 30000;
+  const finish = () => {
+    if (activeRequests > 0 && Date.now() < deadline) return setTimeout(finish, 100);
+    if (INTERCEPTS.length > 0) saveData();
+    writeStatus();
+    process.exit(activeRequests === 0 ? 0 : 1);
+  };
+  finish();
 }
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('message', (message) => {
+  if (message?.type === 'shutdown') gracefulShutdown('IPC');
+});
