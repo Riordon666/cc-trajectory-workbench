@@ -112,6 +112,21 @@ function updateCertHint() {
   }
 }
 
+function updateGlobalCaptureStatus() {
+  const proxy = $('proxyStatus');
+  if (!proxy) return;
+  const legacy = $('captureMode')?.value === 'legacy-mitm';
+  if (!legacy) {
+    proxy.textContent = '◉ Gateway 已就绪';
+    proxy.classList.add('running');
+    proxy.classList.remove('stopped');
+    return;
+  }
+  proxy.textContent = state.proxyRunning ? '◉ Legacy 代理运行中' : '○ Legacy 代理已停止';
+  proxy.classList.toggle('running', state.proxyRunning);
+  proxy.classList.toggle('stopped', !state.proxyRunning);
+}
+
 /* ===== Log highlight ===== */
 function highlightLog(line) {
   let s = escapeHtml(line);
@@ -132,10 +147,7 @@ async function refreshStatus() {
   state.certReady = Boolean(status.certs.certExists && status.certs.keyExists);
   state.gateway = status.gateway || null;
   state.picDir = (status.certs && status.certs.picDir) ? status.certs.picDir : '';
-  const proxy = $('proxyStatus');
-  proxy.textContent = status.proxyRunning ? '◉ 代理运行中' : '○ 代理已停止';
-  proxy.classList.toggle('running', status.proxyRunning);
-  proxy.classList.toggle('stopped', !status.proxyRunning);
+  updateGlobalCaptureStatus();
   setProxyButtonState(status.proxyRunning);
   updateCertHint();
   // 日志自动滚到底部
@@ -210,31 +222,16 @@ async function refreshSession() {
       ${status}
     </div>`;
   }).join('');
+  const existingFileCount = overview.files.filter((file) => file.exists).length;
+  if ($('sidebarFileCount')) $('sidebarFileCount').textContent = `${existingFileCount} / ${overview.files.length}`;
   $('sessionSummary').innerHTML = renderSessionSummary(overview);
   renderOfficialCaptureState(overview);
-  // Session 数据管理面板的状态速览
-  const statusMetrics = [];
-  if (overview.interceptSummary) {
-    statusMetrics.push(
-      ['抓包请求', overview.interceptSummary.successfulRequests, overview.interceptSummary.successfulRequests ? 'ok' : ''],
-      ['失败', overview.interceptSummary.failedRequests, overview.interceptSummary.failedRequests ? 'warn' : 'ok'],
-    );
-  } else {
-    statusMetrics.push(['抓包请求', '未导入', '']);
+  renderSessionDataPanel(overview);
+  updateWorkspaceNav(overview);
+  const expectedEmptyState = overview.state === 'recording' ? 'waiting' : 'empty';
+  if (!overview.interceptSummary && !state.lastInterceptRecords.length && $('captureTableWrap')?.dataset.emptyState !== expectedEmptyState) {
+    refreshInterceptTable();
   }
-  if (overview.historySummary) {
-    statusMetrics.push(
-      ['对话轮次', overview.historySummary.rounds, 'ok'],
-      ['思考轮次', overview.historySummary.thinkingRounds, overview.historySummary.thinkingRounds ? 'ok' : ''],
-    );
-  } else {
-    statusMetrics.push(['对话轮次', '未导入', '']);
-  }
-  const hasDiagnostics = overview.files?.find((f) => f.name === 'diagnostics-result.json')?.exists;
-  statusMetrics.push(
-    ['Diagnostics', hasDiagnostics ? '已运行' : '未运行', hasDiagnostics ? 'ok' : ''],
-  );
-  renderMetrics($('dataStatusMetrics'), statusMetrics);
 
   if (overview.interceptSummary) {
     const eligibility = overview.captureEligibility || {};
@@ -259,28 +256,152 @@ async function refreshSession() {
 
 function renderOfficialCaptureState(overview) {
   const stateName = overview.state || 'draft';
-  const start = $('startOfficialCapture');
-  const stop = $('stopOfficialCapture');
-  const label = $('officialCaptureState');
+  const toggle = $('captureToggle');
+  const statusDot = $('captureStatusDot');
+  const statusTitle = $('captureStatusTitle');
+  const statusSubtitle = $('captureStatusSubtitle');
   const preflightButton = $('runCapturePreflight');
   const preflightLabel = $('preflightState');
-  if (!start || !stop || !label || !preflightButton || !preflightLabel) return;
+  if (!toggle || !statusDot || !statusTitle || !statusSubtitle || !preflightButton || !preflightLabel) return;
   const recording = stateName === 'recording';
   const captureMode = $('captureMode')?.value || overview.captureMode || 'gateway';
+  const legacy = captureMode === 'legacy-mitm';
+  const requests = overview.eventSummary?.types?.request_start
+    ?? overview.interceptSummary?.successfulRequests
+    ?? 0;
+  const events = overview.eventSummary?.total || 0;
   preflightButton.disabled = recording;
-  start.disabled = recording || (captureMode === 'legacy-mitm' && !state.proxyRunning);
-  stop.disabled = !recording;
+  toggle.disabled = !recording && legacy && !state.proxyRunning;
+  toggle.className = `capture-toggle ${recording ? 'btn-danger-light is-recording' : 'primary'}`;
+  toggle.innerHTML = recording
+    ? '<span class="btn-icon">■</span>停止捕获'
+    : '<span class="btn-icon">▶</span>开始捕获';
+  $('captureRequestCount').textContent = String(requests);
+  $('captureEventCount').textContent = String(events);
+  $('captureElapsed').textContent = formatCaptureDuration(overview.recording);
+
+  statusDot.className = 'capture-status-dot';
+  if (recording) {
+    statusDot.classList.add('live');
+    statusTitle.textContent = '正在捕获 Session';
+    statusSubtitle.textContent = `${legacy ? 'Legacy MITM' : 'Gateway'} · 数据持续写入本地`;
+  } else if (stateName === 'recorded') {
+    statusDot.classList.add('done');
+    statusTitle.textContent = '本次捕获已停止';
+    statusSubtitle.textContent = '数据已保存在当前 Session';
+  } else if (legacy && !state.proxyRunning) {
+    statusDot.classList.add('warn');
+    statusTitle.textContent = 'Legacy 代理未启动';
+    statusSubtitle.textContent = '先启动代理，再开始捕获';
+  } else {
+    statusDot.classList.add('ready');
+    statusTitle.textContent = legacy ? 'Legacy 代理已就绪' : 'Gateway 已就绪';
+    statusSubtitle.textContent = '等待开始捕获';
+  }
+
   const check = overview.connectionCheck;
   preflightLabel.textContent = check
     ? `连接诊断：${check.passed ? '正常' : '有提示（非阻断）'} · ${check.model || '模型未观察到'}`
-    : '连接诊断：尚未运行（非阻断）';
-  preflightLabel.className = `hint ${check?.passed ? 'ok' : check ? 'bad' : ''}`;
-  label.textContent = recording
-    ? `状态：录制中（起始 #${overview.recording?.startInterceptId ?? 0}）`
-    : stateName === 'recorded'
-      ? `状态：已停止（#${overview.recording?.startInterceptId ?? 0} → #${overview.recording?.endInterceptId ?? 0}）`
-      : '状态：未开始';
-  label.className = `hint inline ${recording ? 'bad' : stateName === 'recorded' ? 'ok' : ''}`;
+    : '连接诊断尚未运行（非阻断）';
+  preflightLabel.className = `capture-preflight-state ${check?.passed ? 'ok' : check ? 'warn' : ''}`;
+}
+
+function formatCaptureDuration(recording) {
+  if (!recording?.startedAt) return '00:00';
+  const started = new Date(recording.startedAt).getTime();
+  const ended = recording.stoppedAt ? new Date(recording.stoppedAt).getTime() : Date.now();
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return '00:00';
+  const seconds = Math.max(0, Math.floor((ended - started) / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const rest = seconds % 60;
+  return hours
+    ? `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`
+    : `${String(minutes).padStart(2, '0')}:${String(rest).padStart(2, '0')}`;
+}
+
+function renderSessionDataPanel(overview) {
+  const body = $('sessionDataBody');
+  const badge = $('sessionReadinessBadge');
+  if (!body || !badge) return;
+  const fileExists = (name) => Boolean(overview.files?.find((file) => file.name === name)?.exists);
+  const hasCapture = fileExists('gateway-capture.jsonl') || fileExists('https-intercepts.json') || Boolean(overview.interceptSummary);
+  const hasHistory = fileExists('agent-history.jsonl') || fileExists('claude-history.jsonl') || Boolean(overview.historySummary);
+  const eventCount = Number(overview.eventSummary?.total || 0);
+  const hasEvents = eventCount > 0;
+  const hasDiagnostics = fileExists('diagnostics-result.json');
+  const recording = overview.state === 'recording';
+  const models = overview.eventSummary?.models || overview.captureEligibility?.models || [];
+  const requests = overview.eventSummary?.types?.request_start
+    ?? overview.captureEligibility?.proxyRounds
+    ?? overview.interceptSummary?.successfulRequests
+    ?? 0;
+
+  setDataStage('stageCapture', hasCapture || recording, recording ? '捕获中' : hasCapture ? '已有数据' : '等待数据', recording);
+  setDataStage('stageHistory', hasHistory, hasHistory ? '已导入' : '可选导入');
+  setDataStage('stageEvents', hasEvents, hasEvents ? `${eventCount} 条` : '未生成');
+  setDataStage('stageDiagnostics', hasDiagnostics, hasDiagnostics ? '已运行' : '未运行');
+
+  badge.className = 'session-readiness-badge';
+  if (recording) {
+    badge.textContent = '● 捕获中';
+    badge.classList.add('live');
+  } else if (hasDiagnostics) {
+    badge.textContent = '可回放';
+    badge.classList.add('ready');
+  } else if (hasEvents) {
+    badge.textContent = `${eventCount} 个事件`;
+    badge.classList.add('has-data');
+  } else {
+    badge.textContent = '待采集';
+  }
+
+  $('clearHistory').disabled = !hasHistory;
+  $('openReplayFromCapture').disabled = !hasEvents;
+
+  if (!recording && !hasCapture && !hasHistory && !hasEvents) {
+    body.classList.remove('has-summary');
+    body.innerHTML = `<div class="session-empty-state">
+      <span>◇</span>
+      <strong>暂无 Session 数据</strong>
+      <p>开始一次 Gateway 捕获，或者发现并导入本机 Agent History。</p>
+      <div><em>实时捕获</em><em>导入已有会话</em><em>导入后自动归一化</em></div>
+    </div>`;
+    return;
+  }
+
+  const reasoning = overview.eventSummary?.reasoning || 'unavailable';
+  const historyRounds = overview.historySummary?.rounds ?? 0;
+  const diagnostics = overview.diagnosticsSummary?.counts || {};
+  body.classList.add('has-summary');
+  const nextMessage = recording
+    ? '正在记录请求和事件，完成任务后停止捕获。'
+    : hasEvents && !hasHistory
+      ? '事件已生成；可继续导入 Agent History 进行双源对齐。'
+      : hasEvents && !hasDiagnostics
+        ? 'Session 已具备回放数据，建议运行一次 Diagnostics。'
+        : 'Session 数据已准备好，可以进入回放器逐请求检查。';
+  body.innerHTML = `<div class="session-data-summary">
+    <div><span>Agent</span><strong>${escapeHtml(overview.agent || 'unknown')}</strong></div>
+    <div><span>模型</span><strong title="${escapeHtml(models.join(', '))}">${escapeHtml(models.join(', ') || '尚未观察到')}</strong></div>
+    <div><span>请求</span><strong>${escapeHtml(requests)}</strong></div>
+    <div><span>统一事件</span><strong>${escapeHtml(eventCount)}</strong></div>
+    <div><span>History 轮次</span><strong>${escapeHtml(historyRounds || '未导入')}</strong></div>
+    <div><span>Reasoning</span><strong>${escapeHtml(reasoning)}</strong></div>
+  </div>
+  <div class="session-next-step ${recording ? 'live' : ''}">
+    <span>${recording ? '●' : '→'}</span>
+    <div><strong>${escapeHtml(nextMessage)}</strong><small>${hasDiagnostics ? `Diagnostics：${diagnostics.error || 0} error / ${diagnostics.warning || 0} warning` : 'Diagnostics 是非阻断的，不影响查看或导出。'}</small></div>
+  </div>`;
+}
+
+function setDataStage(id, complete, status, active = false) {
+  const stage = $(id);
+  if (!stage) return;
+  stage.classList.toggle('complete', complete);
+  stage.classList.toggle('active', active);
+  const small = stage.querySelector('small');
+  if (small) small.textContent = status;
 }
 
 async function runCapturePreflight() {
@@ -304,6 +425,11 @@ async function stopOfficialCapture() {
   await api(`/api/sessions/${currentSessionId()}/recording-stop`, { method: 'POST', body: '{}' });
   await refreshStatus();
   showToast('Session 录制已停止', 'success');
+}
+
+async function toggleOfficialCapture() {
+  if (state.currentOverview?.state === 'recording') return stopOfficialCapture();
+  return startOfficialCapture();
 }
 
 function renderSessionExplorer(overview) {
@@ -338,11 +464,18 @@ function updateCaptureControls() {
   const endpoint = state.gateway?.endpoints?.find((item) => item.protocol === protocol);
   $('gatewayBaseUrl').value = endpoint?.base_url || `http://127.0.0.1:5177/gateway/${protocol === 'openai-responses' ? 'openai' : 'anthropic'}`;
   const legacy = mode === 'legacy-mitm';
+  $('captureModePill').textContent = legacy ? 'Legacy MITM' : 'Gateway';
+  $('captureModePill').classList.toggle('legacy', legacy);
+  document.querySelectorAll('.legacy-field').forEach((field) => { field.hidden = !legacy; });
+  $('legacyProxyControls').hidden = !legacy;
+  $('legacyCommandSection').hidden = !legacy;
   updateCertHint();
+  updateGlobalCaptureStatus();
   for (const id of ['proxyPort', 'targetHost', 'startProxy', 'stopProxy', 'copyBashCommand', 'copyBashOnly', 'copyPSCommand', 'copyPSOnly', 'copyCMDCommand', 'copyCMDOnly']) {
     const element = $(id);
     if (element) element.disabled = !legacy;
   }
+  if (legacy) setProxyButtonState(state.proxyRunning);
   if (state.currentOverview) renderOfficialCaptureState(state.currentOverview);
 }
 
@@ -433,14 +566,16 @@ async function clearSession() {
   $('interceptsTable').innerHTML = '';
   $('interceptToolbar').style.display = 'none';
   $('verifyMetrics').innerHTML = '';
-  $('verifyTable').innerHTML = '';
+  $('verifyTable').innerHTML = diagnosticsEmptyState();
   $('verifyResult').textContent = '';
+  $('verifyResult').hidden = true;
+  bindEmptyStateActions($('verifyTable'));
   if ($('explorerPreview')) $('explorerPreview').textContent = '';
   showToast('工作台显示已清空，文件未删除', 'success');
 }
 
 async function clearHistory() {
-  if (!confirm('确认删除当前 Session 的 claude-history.jsonl 文件？\n\n删除后可以重新导入正确的历史。')) return;
+  if (!confirm('确认删除当前 Session 已导入的 Agent History？\n\n删除后可以重新导入正确的历史文件。')) return;
   try {
     await api(`/api/sessions/${currentSessionId()}/clear-history`, { method: 'POST' });
     await refreshStatus();
@@ -691,14 +826,17 @@ async function startProxy() {
 function setProxyButtonState(running) {
   const startBtn = $('startProxy');
   const stopBtn = $('stopProxy');
+  if (!startBtn || !stopBtn) return;
+  startBtn.disabled = running;
+  stopBtn.disabled = !running;
   if (running) {
     startBtn.classList.add('btn-running');
-    startBtn.innerHTML = '<span class="btn-icon">◉</span>代理中';
+    startBtn.innerHTML = '<span class="btn-icon">◉</span>Legacy 代理运行中';
     stopBtn.classList.add('btn-stop');
     stopBtn.classList.remove('disabled');
   } else {
     startBtn.classList.remove('btn-running');
-    startBtn.innerHTML = '<span class="btn-icon">▶</span>启动代理';
+    startBtn.innerHTML = '<span class="btn-icon">▶</span>启动 Legacy 代理';
     stopBtn.classList.remove('btn-stop');
     stopBtn.classList.add('disabled');
   }
@@ -740,6 +878,88 @@ async function shutdownWorkbench() {
 /* ===== Empty state ===== */
 function emptyState(icon, line) {
   return `<div class="empty-state"><div class="empty-icon">${icon}</div><div class="empty-line">${line}</div></div>`;
+}
+
+function diagnosticsEmptyState() {
+  return `<div class="rich-empty-state diagnostics-empty">
+    <span class="rich-empty-visual">⌕</span>
+    <strong>尚未运行 Diagnostics</strong>
+    <p>捕获或导入 Session 后运行诊断，检查完整性、错误和双源差异。</p>
+    <button data-empty-action="diagnostics" class="diagnostic-action">✓ 运行 Diagnostics</button>
+  </div>`;
+}
+
+function captureEmptyState(kind = 'empty') {
+  const recording = state.currentOverview?.state === 'recording';
+  if (recording) {
+    return `<div class="rich-empty-state capture-empty waiting">
+      <span class="rich-empty-visual live-radar"><i></i></span>
+      <strong>正在等待第一个请求</strong>
+      <p>在 Agent 中使用上方 Local Base URL，收到请求后会自动出现在这里。</p>
+    </div>`;
+  }
+  if (kind === 'filtered') {
+    return `<div class="rich-empty-state capture-empty">
+      <span class="rich-empty-visual">⌕</span>
+      <strong>没有符合当前筛选条件的数据</strong>
+      <p>清除状态、模型和关键词筛选后再看看。</p>
+      <button data-empty-action="clear-filters">清除筛选</button>
+    </div>`;
+  }
+  return `<div class="rich-empty-state capture-empty">
+    <span class="rich-empty-visual">⌁</span>
+    <strong>这里会呈现实时请求轨迹</strong>
+    <p>启动捕获后运行 Agent，或导入已有 Agent History 开始探索。</p>
+    <div class="rich-empty-actions">
+      <button data-empty-action="capture" class="primary">● 开始捕获</button>
+      <button data-empty-action="history">从 History 导入</button>
+    </div>
+  </div>`;
+}
+
+function bindEmptyStateActions(root = document) {
+  root.querySelectorAll('[data-empty-action]').forEach((button) => {
+    button.addEventListener('click', wrap(async () => {
+      const action = button.dataset.emptyAction;
+      if (action === 'capture') await toggleOfficialCapture();
+      if (action === 'history') await scanHistories();
+      if (action === 'diagnostics') await runVerify();
+      if (action === 'clear-filters') {
+        $('filterStatus').value = '';
+        $('filterModel').value = '';
+        $('filterSearch').value = '';
+        refreshInterceptTable();
+      }
+    }, button));
+  });
+}
+
+function updateWorkspaceNav(overview = state.currentOverview) {
+  if (!overview) return;
+  const requestCount = overview.interceptSummary?.successfulRequests || 0;
+  const eventCount = overview.eventSummary?.total || overview.eventsSummary?.total || 0;
+  const diagCounts = overview.diagnosticsSummary?.counts || {};
+  const issueCount = (diagCounts.error || 0) + (diagCounts.warning || 0);
+  const a = $('tabStateA');
+  const b = $('tabStateB');
+  const d = $('tabStateD');
+  if (a) {
+    const recording = overview.state === 'recording';
+    a.textContent = recording ? '● LIVE' : (requestCount ? String(requestCount) : '待机');
+    a.classList.toggle('live', recording);
+  }
+  if (b) b.textContent = String(eventCount);
+  if (d) {
+    d.textContent = String(issueCount);
+    d.classList.toggle('issue', issueCount > 0);
+  }
+}
+
+function updateTerminalTabState(ready) {
+  const badge = $('tabStateC');
+  if (!badge) return;
+  badge.classList.toggle('connected', Boolean(ready));
+  badge.title = ready ? '终端已连接' : '终端未连接';
 }
 
 function sortRecords(records, field, dir) {
@@ -790,10 +1010,14 @@ function applyInterceptFilters(records) {
 
 function refreshInterceptTable() {
   const records = state.lastInterceptRecords;
+  const wrapEl = $('captureTableWrap');
   if (!records || !records.length) {
-    $('interceptsTable').innerHTML = `<tr><td colspan="9">${emptyState('📡', '还没有抓包数据，先启动代理采集吧~')}</td></tr>`;
+    $('interceptsTable').innerHTML = `<tr><td colspan="9">${captureEmptyState()}</td></tr>`;
+    wrapEl?.classList.add('empty');
+    if (wrapEl) wrapEl.dataset.emptyState = state.currentOverview?.state === 'recording' ? 'waiting' : 'empty';
     $('interceptToolbar').style.display = 'none';
     $('filterCount').textContent = '';
+    bindEmptyStateActions($('interceptsTable'));
     return;
   }
   const filtered = applyInterceptFilters(records);
@@ -809,19 +1033,24 @@ function refreshInterceptTable() {
 
   const tbody = $('interceptsTable');
   if (!filtered.length) {
-    tbody.innerHTML = `<tr><td colspan="9">${emptyState('🔍', '没有匹配的抓包记录')}</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="9">${captureEmptyState('filtered')}</td></tr>`;
+    wrapEl?.classList.add('empty');
+    if (wrapEl) wrapEl.dataset.emptyState = 'filtered';
+    bindEmptyStateActions(tbody);
   } else {
+    wrapEl?.classList.remove('empty');
+    if (wrapEl) delete wrapEl.dataset.emptyState;
     tbody.innerHTML = sorted.map((r) => `
-      <tr class="clickable-row" data-index="${r.seqIndex}">
+      <tr class="clickable-row request-row ${r.status >= 200 && r.status < 300 ? 'ok' : 'error'}" data-index="${r.seqIndex}">
         <td>${r.seqIndex}</td>
-        <td>${r.status}</td>
-        <td>${escapeHtml(r.requestModel || r.responseModel || '')}</td>
+        <td><span class="http-status ${r.status >= 200 && r.status < 300 ? 'ok' : 'error'}">${r.status || '—'}</span></td>
+        <td><span class="model-pill" title="${escapeHtml(r.requestModel || r.responseModel || 'unavailable')}">${escapeHtml(r.requestModel || r.responseModel || 'unavailable')}</span></td>
         <td>${escapeHtml(r.path || '')}</td>
-        <td>${r.duration || ''}ms</td>
+        <td>${r.duration ? `${escapeHtml(r.duration)}ms` : '—'}</td>
         <td>${escapeHtml(tokenText(r.tokens))}</td>
-        <td>${escapeHtml((r.toolCalls || []).join(', '))}</td>
-        <td>${r.reasoningLength}</td>
-        <td>${escapeHtml(r.responsePreview || '')}</td>
+        <td><span class="tool-count" title="${escapeHtml((r.toolCalls || []).join(', ') || '无工具调用')}">${(r.toolCalls || []).length}</span></td>
+        <td>${r.reasoningLength ? escapeHtml(r.reasoningLength) : '<span class="unavailable">unavailable</span>'}</td>
+        <td><span class="table-preview" title="${escapeHtml(r.responsePreview || '')}">${escapeHtml(r.responsePreview || '—')}</span></td>
       </tr>
     `).join('');
   }
@@ -892,6 +1121,7 @@ function progressBar(pct, good) {
 
 async function runVerify() {
   const data = await api(`/api/sessions/${currentSessionId()}/diagnostics`, { method: 'POST', body: '{}' });
+  $('verifyResult').hidden = false;
   if (!data.summary) {
     renderMetrics($('verifyMetrics'), [
       ['Status', data.status || 'ok', data.status === 'error' ? 'error' : data.status === 'warning' ? 'warn' : 'ok'],
@@ -900,7 +1130,7 @@ async function runVerify() {
       ['Errors', data.counts?.error || 0, data.counts?.error ? 'error' : 'ok'],
       ['Reasoning', data.stats?.reasoningEvents ? 'available' : 'unavailable', data.stats?.reasoningEvents ? 'ok' : 'warn'],
     ]);
-    $('verifyTable').innerHTML = (data.items || []).map((item) => `<div class="diag-item ${escapeHtml(item.level)}"><strong>${escapeHtml(item.level)} · ${escapeHtml(item.code)}</strong><span>${escapeHtml(item.message)}</span></div>`).join('') || emptyState('◇', 'Diagnostics 未发现异常');
+    $('verifyTable').innerHTML = (data.items || []).map((item) => `<div class="diag-item ${escapeHtml(item.level)}"><strong>${escapeHtml(item.level)} · ${escapeHtml(item.code)}</strong><span>${escapeHtml(item.message)}</span></div>`).join('') || `<div class="rich-empty-state diagnostics-empty success"><span class="rich-empty-visual">✓</span><strong>Diagnostics 未发现异常</strong><p>当前 Session 的结构、完整性和事件关系均未发现问题。</p></div>`;
     $('verifyResult').textContent = JSON.stringify(data, null, 2);
     await refreshSession();
     showToast(data.status === 'ok' ? 'Diagnostics 未发现异常 ✦' : 'Diagnostics 有提示，不影响查看或导出 Session', data.status === 'error' ? 'warn' : 'success');
@@ -1050,7 +1280,7 @@ function renderReplayTimeline(data) {
       <button class="replay-node ${replayStatusClass(turn.status)} ${selected ? 'active' : ''}" data-turn-index="${turn.turnIndex}">
         <span class="replay-node-main">
           <strong>#${turn.turnIndex}</strong>
-          <span>${escapeHtml(replayStatusText(turn.status))}</span>
+          <span class="replay-status-chip">${escapeHtml(replayStatusText(turn.status))}</span>
         </span>
         <span class="replay-node-sub">${escapeHtml(turn.proxy?.requestModel || turn.assistant?.modelId || 'model: -')}</span>
         <span class="replay-node-note">${escapeHtml(note)}</span>
@@ -1066,7 +1296,7 @@ function renderReplayTimeline(data) {
       <button class="replay-node ${replayStatusClass(item.status)} ${selected ? 'active' : ''}" data-proxy-only-index="${index}">
         <span class="replay-node-main">
           <strong>Proxy #${item.proxy?.seqIndex ?? '-'}</strong>
-          <span>${escapeHtml(label)}</span>
+          <span class="replay-status-chip">${escapeHtml(label)}</span>
         </span>
         <span class="replay-node-sub">${escapeHtml(item.proxy?.path || '')}</span>
         <span class="replay-node-note">${escapeHtml(firstDiag.message || '')}</span>
@@ -1292,6 +1522,7 @@ const DEFAULT_THEME = {
   wallpaperOpacity: 100,
   brightness: 100,
   blur: 0,
+  focusMode: false,
 };
 
 function loadTheme() {
@@ -1299,6 +1530,7 @@ function loadTheme() {
     const saved = JSON.parse(localStorage.getItem('workbenchTheme'));
     // 兼容旧版没有 wallpaperOpacity 的存档
     if (saved && saved.wallpaperOpacity === undefined) saved.wallpaperOpacity = DEFAULT_THEME.wallpaperOpacity;
+    if (saved && saved.focusMode === undefined) saved.focusMode = DEFAULT_THEME.focusMode;
     return saved || { ...DEFAULT_THEME };
   } catch {
     return { ...DEFAULT_THEME };
@@ -1316,6 +1548,8 @@ function applyTheme(t) {
   body.style.setProperty('--wallpaper-opacity', t.wallpaperOpacity / 100);
   body.style.setProperty('--wallpaper-brightness', t.brightness / 100);
   body.style.setProperty('--wallpaper-blur', `${t.blur}px`);
+  body.classList.toggle('focus-mode', Boolean(t.focusMode));
+  if ($('focusModeToggle')) $('focusModeToggle').checked = Boolean(t.focusMode);
 
   // 更新滑条
   ['panelOpacity', 'wallpaperOpacity', 'wallpaperBrightness', 'wallpaperBlur'].forEach((id) => {
@@ -1374,7 +1608,10 @@ async function handleWallpaperFile() {
 async function toggleThemePopover() {
   const popover = $('themePopover');
   popover.classList.toggle('hidden');
-  if (!popover.classList.contains('hidden')) {
+  const open = !popover.classList.contains('hidden');
+  $('themeBtn').classList.toggle('active', open);
+  $('themeBtn').setAttribute('aria-expanded', String(open));
+  if (open) {
     updateWallpaperName();
     let picDir = state.picDir;
     if (!picDir) {
@@ -1393,6 +1630,8 @@ function closeThemePopover(e) {
   const wrapper = document.querySelector('.theme-wrapper');
   if (wrapper && !wrapper.contains(e.target)) {
     $('themePopover').classList.add('hidden');
+    $('themeBtn').classList.remove('active');
+    $('themeBtn').setAttribute('aria-expanded', 'false');
   }
 }
 
@@ -1437,6 +1676,12 @@ function initTheme() {
   });
 
   $('themeReset').addEventListener('click', resetTheme);
+  $('focusModeToggle')?.addEventListener('change', () => {
+    const th = loadTheme();
+    th.focusMode = $('focusModeToggle').checked;
+    saveTheme(th);
+    applyTheme(th);
+  });
 
   document.addEventListener('click', closeThemePopover);
 }
@@ -1493,11 +1738,17 @@ function bind() {
   // 折叠面板切换
   document.querySelectorAll('.collapse-toggle').forEach((toggle) => {
     toggle.addEventListener('click', () => {
-      const target = document.getElementById(toggle.dataset.target);
-      if (target) target.classList.toggle('collapsed');
+      const panel = toggle.closest('.collapsible');
+      if (!panel) return;
+      const collapsed = panel.classList.toggle('collapsed');
+      toggle.setAttribute('aria-expanded', String(!collapsed));
     });
   });
-  $('sessionSelect').addEventListener('change', refreshSession);
+  $('sessionSelect').addEventListener('change', async () => {
+    state.lastInterceptRecords = [];
+    await refreshSession();
+    if (state.currentOverview?.interceptSummary) await loadIntercepts({ quiet: true });
+  });
   $('createSession').addEventListener('click', wrap(() => createSession(), $('createSession')));
   $('confirmNewSession').addEventListener('click', wrap(confirmNewSession, $('confirmNewSession')));
   $('newSessionName').addEventListener('keydown', (e) => {
@@ -1519,14 +1770,14 @@ function bind() {
   $('startProxy').addEventListener('click', wrap(startProxyWrapped, $('startProxy')));
   $('stopProxy').addEventListener('click', wrap(stopProxy, $('stopProxy')));
   $('runCapturePreflight').addEventListener('click', wrap(runCapturePreflight, $('runCapturePreflight')));
-  $('startOfficialCapture').addEventListener('click', wrap(startOfficialCapture, $('startOfficialCapture')));
-  $('stopOfficialCapture').addEventListener('click', wrap(stopOfficialCapture, $('stopOfficialCapture')));
+  $('captureToggle').addEventListener('click', wrap(toggleOfficialCapture, $('captureToggle')));
   $('captureMode').addEventListener('change', updateCaptureControls);
   $('protocolAdapter').addEventListener('change', updateCaptureControls);
   $('agentAdapter').addEventListener('change', () => {
     $('protocolAdapter').value = $('agentAdapter').value === 'codex-cli' ? 'openai-responses' : 'anthropic-messages';
     updateCaptureControls();
   });
+  $('openReplayFromCapture').addEventListener('click', () => document.querySelector('.tab[data-tab="workspaceD"]').click());
   $('shutdownWorkbench').addEventListener('click', shutdownWorkbench);
   $('loadIntercepts').addEventListener('click', wrap(loadIntercepts, $('loadIntercepts')));
   // 筛选控件
@@ -1561,6 +1812,7 @@ function bind() {
     });
   });
   $('runVerify').addEventListener('click', wrap(runVerify, $('runVerify')));
+  bindEmptyStateActions();
   $('loadReplay').addEventListener('click', wrap(loadReplay, $('loadReplay')));
   $('replayOnlyProblems').addEventListener('change', () => {
     state.replay.onlyProblems = $('replayOnlyProblems').checked;
@@ -1899,6 +2151,7 @@ function connectTerminalWs(term, fitAddon) {
     t.ready = true;
     t.connecting = false;
     t.currentShell = t.shell; // track which shell is connected
+    updateTerminalTabState(true);
     if (reconnectBtn) reconnectBtn.style.display = 'none';
     if (hint) { hint.textContent = '● 已连接'; hint.className = 'hint inline ok'; }
     // Immediately sync PTY size to actual terminal dimensions
@@ -1917,6 +2170,7 @@ function connectTerminalWs(term, fitAddon) {
     t.ready = false;
     t.connecting = false;
     t.ws = null;
+    updateTerminalTabState(false);
     if (reconnectBtn) reconnectBtn.style.display = '';
     if (hint) { hint.textContent = '○ 已断开'; hint.className = 'hint inline bad'; }
     term.write('\r\n\x1b[33m[连接断开，点击"重连"按钮]\x1b[0m\r\n');
@@ -1945,8 +2199,9 @@ initParticles();
 initTheme();
 initPortrait();
 initLogScroll();
-refreshStatus().then(() => {
+refreshStatus().then(async () => {
   updateCaptureControls();
+  if (state.currentOverview?.interceptSummary) await loadIntercepts({ quiet: true });
   if (!state.sessions.length) openNewSessionModal();
 }).catch((err) => showToast(err.message || '初始化失败', 'error', 4000));
 state.statusTimer = setInterval(() => refreshStatus().catch(() => {}), 2500);

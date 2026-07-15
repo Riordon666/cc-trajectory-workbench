@@ -19,8 +19,33 @@
         </div>
         <div class="topbar-actions">
           <div class="theme-wrapper">
-            <button id="themeBtn" class="theme-btn" title="主题设置">🎨</button>
+            <button id="themeBtn" class="theme-btn" title="壁纸与外观设置" aria-expanded="false">
+              <span class="theme-btn-icon" aria-hidden="true">
+                <svg class="theme-palette-svg" viewBox="0 0 32 32" focusable="false">
+                  <defs>
+                    <linearGradient id="paletteShell" x1="5" y1="5" x2="27" y2="27" gradientUnits="userSpaceOnUse">
+                      <stop stop-color="#fff8fc"/>
+                      <stop offset="0.48" stop-color="#dceffc"/>
+                      <stop offset="1" stop-color="#f8dce9"/>
+                    </linearGradient>
+                  </defs>
+                  <path class="palette-shell" d="M15.8 4.7C9.1 4.7 4.2 9.2 4.2 15c0 6 4.5 11 10.5 12.1 1.5.3 2.7-1.1 2.1-2.5l-.3-.7a2.3 2.3 0 0 1 2.1-3.2H21c4 0 7-3 7-6.9 0-5.3-5.2-9.1-12.2-9.1Z"/>
+                  <circle class="paint-dot paint-pink" cx="10" cy="11" r="2"/>
+                  <circle class="paint-dot paint-blue" cx="16" cy="8.6" r="2"/>
+                  <circle class="paint-dot paint-gold" cx="22" cy="11.2" r="2"/>
+                  <circle class="paint-dot paint-mint" cx="9.5" cy="17" r="2"/>
+                  <path class="palette-sparkle sparkle-one" d="M26.5 3.5v4M24.5 5.5h4"/>
+                  <path class="palette-sparkle sparkle-two" d="M25.2 23.5v2.8M23.8 24.9h2.8"/>
+                </svg>
+              </span>
+              <span class="theme-btn-label">壁纸与外观</span>
+              <span class="theme-btn-caret">⌄</span>
+            </button>
             <div class="theme-popover hidden" id="themePopover">
+              <div class="theme-popover-head">
+                <span class="theme-popover-icon">✦</span>
+                <div><strong>外观设置</strong><small>壁纸、透明度与显示效果</small></div>
+              </div>
               <div class="theme-section">
                 <div class="theme-label">壁纸</div>
                 <div class="wp-current" id="wpCurrentName"></div>
@@ -44,6 +69,11 @@
                 <div class="theme-label">壁纸模糊 <span id="blurVal">0px</span></div>
                 <input type="range" id="wallpaperBlur" min="0" max="20" value="0" step="1">
               </div>
+              <label class="theme-switch-row">
+                <span><strong>专注模式</strong><small>增强卡片对比度，保留壁纸氛围</small></span>
+                <input id="focusModeToggle" type="checkbox">
+                <i></i>
+              </label>
               <button id="themeReset" class="theme-reset">恢复默认</button>
             </div>
           </div>
@@ -59,8 +89,12 @@
           <img id="characterPortrait" class="character-portrait" src="/pic/DoremsangD-5.png" alt="character">
           <div class="portrait-banner" style="background-image:url('/pic/3rdcountdown-1.png')"></div>
         </div>
-        <section class="panel">
-          <h2>Session</h2>
+        <section class="panel collapsible sidebar-session-panel">
+          <div class="sidebar-panel-head">
+            <h2>Session</h2>
+            <button class="collapse-toggle" data-target="sessionPanelBody" aria-expanded="true" title="折叠 Session 面板"><span class="toggle-icon">›</span></button>
+          </div>
+          <div class="collapse-body" id="sessionPanelBody">
           <label>当前 Session</label>
           <select id="sessionSelect"></select>
           <div class="row" style="margin-top:3px">
@@ -73,78 +107,117 @@
             <button id="openSessionDir"><span class="btn-icon">▣</span>打开目录</button>
             <button id="importSession" class="import-btn"><span class="btn-icon">⇩</span>从已有 Session 导入</button>
           </div>
-          <div class="file-list" id="sessionFiles"></div>
+          <div class="sidebar-subsection">
+            <div class="sidebar-subtitle"><span>Data Files</span><small id="sidebarFileCount">0 / 0</small></div>
+            <div class="file-list" id="sessionFiles"></div>
+          </div>
           <div class="session-summary" id="sessionSummary"></div>
+          </div>
         </section>
 
-        <section class="panel">
-          <h2>日志</h2>
-          <pre class="logs" id="logs"></pre>
+        <section class="panel collapsible collapsed sidebar-log-panel">
+          <div class="sidebar-panel-head">
+            <h2>System Log</h2>
+            <button class="collapse-toggle" data-target="logPanelBody" aria-expanded="false" title="展开系统日志"><span class="toggle-icon">›</span></button>
+          </div>
+          <div class="collapse-body" id="logPanelBody"><pre class="logs" id="logs"></pre></div>
         </section>
       </aside>
 
       <section class="content">
-        <nav class="tabs">
-          <button class="tab active" data-tab="workspaceA">A：Live Capture</button>
-          <button class="tab" data-tab="workspaceB">B：Session Explorer</button>
-          <button class="tab" data-tab="workspaceC">C：Terminal</button>
-          <button class="tab" data-tab="workspaceD">D：Replay &amp; Diagnostics</button>
+        <nav class="tabs" aria-label="工作区导航">
+          <button class="tab active" data-tab="workspaceA" title="实时捕获 API 请求与 Agent 轨迹"><span class="tab-key">A</span><span class="tab-label">Live Capture</span><span class="tab-state" id="tabStateA">待机</span></button>
+          <button class="tab" data-tab="workspaceB" title="浏览统一事件与 Session 文件"><span class="tab-key">B</span><span class="tab-label">Session Explorer</span><span class="tab-state" id="tabStateB">0</span></button>
+          <button class="tab" data-tab="workspaceC" title="使用内置本地终端"><span class="tab-key">C</span><span class="tab-label">Terminal</span><span class="tab-state dot" id="tabStateC"></span></button>
+          <button class="tab" data-tab="workspaceD" title="回放请求并定位诊断问题"><span class="tab-key">D</span><span class="tab-label">Replay &amp; Diagnostics</span><span class="tab-state" id="tabStateD">0</span></button>
         </nav>
 
         <section id="workspaceA" class="tab-panel active">
-          <div class="grid two">
-            <section class="panel">
-              <h2>Capture 配置 <span class="hint inline" id="certHint"></span></h2>
+          <div class="grid two workspace-a-overview">
+            <section class="panel capture-panel">
+              <div class="panel-head capture-panel-head">
+                <h2>Capture 配置</h2>
+                <span class="capture-mode-pill" id="captureModePill">Gateway</span>
+                <span class="hint inline" id="certHint"></span>
+              </div>
               <div class="proxy-layout">
                 <div class="proxy-inputs">
                   <label>捕获模式<select id="captureMode"><option value="gateway">Gateway（默认）</option><option value="legacy-mitm">Advanced / Legacy MITM</option></select></label>
                   <label>Agent<select id="agentAdapter"><option value="unknown">Unknown / API only</option><option value="claude-code">Claude Code</option><option value="codex-cli">Codex CLI</option></select></label>
                   <label>协议<select id="protocolAdapter"><option value="anthropic-messages">Anthropic Messages API</option><option value="openai-responses">OpenAI Responses API</option></select></label>
                   <label>Local Base URL<input id="gatewayBaseUrl" readonly value="http://127.0.0.1:5177/gateway/anthropic"></label>
-                  <label>代理端口<input id="proxyPort" type="number" value="8888" class="input-sm" style="width:60%"></label>
-                  <label>TARGET_HOST<input id="targetHost" placeholder="留空则拦截全部" class="input-sm" style="width:60%"></label>
+                  <label class="legacy-field">代理端口<input id="proxyPort" type="number" value="8888" class="input-sm"></label>
+                  <label class="legacy-field">TARGET_HOST<input id="targetHost" placeholder="留空则拦截全部" class="input-sm"></label>
                 </div>
-                <div class="proxy-actions">
-                  <button id="startProxy" class="primary proxy-btn-tall"><span class="btn-icon">▶</span>启动代理</button>
-                  <button id="stopProxy" class="proxy-btn-tall disabled"><span class="btn-icon">■</span>停止代理</button>
+                <div class="capture-control-card" id="captureControlCard">
+                  <div class="capture-status-head">
+                    <span class="capture-status-dot ready" id="captureStatusDot"></span>
+                    <div>
+                      <strong id="captureStatusTitle">Gateway 已就绪</strong>
+                      <span id="captureStatusSubtitle">等待开始捕获</span>
+                    </div>
+                  </div>
+                  <div class="capture-live-metrics">
+                    <div><strong id="captureRequestCount">0</strong><span>请求</span></div>
+                    <div><strong id="captureEventCount">0</strong><span>事件</span></div>
+                    <div><strong id="captureElapsed">00:00</strong><span>时长</span></div>
+                  </div>
+                  <button id="captureToggle" class="primary capture-toggle"><span class="btn-icon">▶</span>开始捕获</button>
+                  <button id="runCapturePreflight" class="capture-secondary"><span class="btn-icon">✓</span>连接诊断</button>
+                  <div class="legacy-proxy-controls" id="legacyProxyControls" hidden>
+                    <button id="startProxy" class="primary"><span class="btn-icon">▶</span>启动 Legacy 代理</button>
+                    <button id="stopProxy" class="disabled"><span class="btn-icon">■</span>停止代理</button>
+                  </div>
+                  <div id="preflightState" class="capture-preflight-state">连接诊断尚未运行（非阻断）</div>
                 </div>
               </div>
-              <div class="proxy-copy-row">
+              <div class="proxy-copy-row" id="legacyCommandSection" hidden>
                 <span class="proxy-cmd-group shell-bash"><button id="copyBashCommand" class="btn-sm"><span class="btn-icon">▶</span>在 Git Bash 终端启动</button><button id="copyBashOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
                 <span class="proxy-cmd-group shell-ps"><button id="copyPSCommand" class="btn-sm"><span class="btn-icon">▶</span>在 PowerShell 终端启动</button><button id="copyPSOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
                 <span class="proxy-cmd-group shell-cmd"><button id="copyCMDCommand" class="btn-sm"><span class="btn-icon">▶</span>在 CMD 终端启动</button><button id="copyCMDOnly" class="btn-sm btn-copy-only"><span class="btn-icon">⧉</span>只复制命令</button></span>
               </div>
-              <div class="actions" style="margin-top:10px">
-                <button id="runCapturePreflight"><span class="btn-icon">✓</span>连接诊断</button>
-                <button id="startOfficialCapture" class="primary"><span class="btn-icon">●</span>开始录制</button>
-                <button id="stopOfficialCapture" class="btn-danger-light"><span class="btn-icon">■</span>停止录制</button>
-                <span id="officialCaptureState" class="hint inline">状态：未开始</span>
-              </div>
-              <div id="preflightState" class="hint" style="margin-top:8px">连接诊断是非阻断的；即使有 warning，仍可查看自己的 Session。</div>
             </section>
 
-            <section class="panel">
-              <h2>Session 数据管理</h2>
-              <p class="hint">
-                ⌕ 从 Agent History 导入 —— 支持 Claude Code 和 Codex CLI<br>
-                ↺ 清除工作台显示 —— 重置界面，不删除 Session 文件
-              </p>
-              <div class="metrics" id="dataStatusMetrics"></div>
-              <div class="actions">
-                <button id="scanHistories" class="primary"><span class="btn-icon">⌕</span>从 Agent History 导入</button>
-                <button id="clearHistory" class="btn-danger-light"><span class="btn-icon">✕</span>历史导入错了？点我清除历史文件</button>
-                <button id="clearSession" class="btn-danger-light"><span class="btn-icon">↺</span>清除工作台显示</button>
+            <section class="panel session-data-panel">
+              <div class="panel-head session-data-head">
+                <div>
+                  <h2>Session 数据</h2>
+                  <p class="hint">从捕获或本地 History 建立统一事件，再进入诊断与回放。</p>
+                </div>
+                <span class="session-readiness-badge" id="sessionReadinessBadge">待采集</span>
+              </div>
+              <div class="session-pipeline" aria-label="Session 数据处理进度">
+                <div class="data-stage" id="stageCapture"><span>1</span><strong>Capture</strong><small>等待数据</small></div>
+                <i>›</i>
+                <div class="data-stage" id="stageHistory"><span>2</span><strong>History</strong><small>未导入</small></div>
+                <i>›</i>
+                <div class="data-stage" id="stageEvents"><span>3</span><strong>统一事件</strong><small>未生成</small></div>
+                <i>›</i>
+                <div class="data-stage" id="stageDiagnostics"><span>4</span><strong>Diagnostics</strong><small>未运行</small></div>
+              </div>
+              <div class="session-data-body" id="sessionDataBody">
+                <div class="session-empty-state">
+                  <span>◇</span>
+                  <strong>暂无 Session 数据</strong>
+                  <p>开始一次捕获，或者导入本机 Agent History。</p>
+                </div>
+              </div>
+              <div class="actions session-data-actions">
+                <button id="scanHistories" class="primary"><span class="btn-icon">⌕</span>发现本地 History</button>
+                <button id="openReplayFromCapture"><span class="btn-icon">▶</span>打开回放</button>
+                <button id="clearHistory" class="btn-danger-light"><span class="btn-icon">✕</span>清除 History</button>
+                <button id="clearSession"><span class="btn-icon">↺</span>清空页面显示</button>
               </div>
             </section>
           </div>
 
-          <section class="panel">
+          <section class="panel capture-data-panel">
             <div class="panel-head">
               <h2>抓包数据</h2>
               <div class="metrics" id="captureMetrics"></div>
               <div class="actions compact">
-                <button id="loadIntercepts" class="primary"><span class="btn-icon">↻</span>刷新抓包</button>
-                <button id="runVerify" class="primary"><span class="btn-icon">✓</span>运行 Diagnostics</button>
+                <button id="loadIntercepts"><span class="btn-icon">↻</span>刷新抓包</button>
+                <button id="runVerify" class="diagnostic-action"><span class="btn-icon">✓</span>运行 Diagnostics</button>
               </div>
             </div>
             <div class="toolbar-row" id="interceptToolbar" style="display:none">
@@ -155,7 +228,7 @@
               </div>
               <span class="filter-count" id="filterCount"></span>
             </div>
-            <div class="table-wrap">
+            <div class="table-wrap capture-table-wrap empty" id="captureTableWrap">
               <table>
                 <thead>
                   <tr>
@@ -175,11 +248,11 @@
             </div>
           </section>
 
-          <section class="panel">
-            <h2>Diagnostics（非阻断）</h2>
+          <section class="panel diagnostics-panel">
+            <div class="panel-head diagnostics-head"><div><h2>Diagnostics</h2><p class="hint">非阻断诊断不会阻止查看、回放或导出自己的 Session。</p></div><span class="diagnostics-mode-badge">NON-BLOCKING</span></div>
             <div class="metrics" id="verifyMetrics"></div>
-            <div class="verify-table" id="verifyTable"></div>
-            <pre class="result" id="verifyResult"></pre>
+            <div class="verify-table" id="verifyTable"><div class="rich-empty-state diagnostics-empty"><span class="rich-empty-visual">⌕</span><strong>尚未运行 Diagnostics</strong><p>捕获或导入 Session 后运行诊断，检查完整性、错误和双源差异。</p><button data-empty-action="diagnostics" class="diagnostic-action">✓ 运行 Diagnostics</button></div></div>
+            <pre class="result" id="verifyResult" hidden></pre>
           </section>
         </section>
 
