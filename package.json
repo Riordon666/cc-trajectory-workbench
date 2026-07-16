@@ -1,16 +1,25 @@
 {
-  "name": "cline-api-proxy",
-  "version": "0.4.0",
-  "description": "MITM 代理：拦截 Cline 与 API 供应商之间的请求/响应，并与 Cline 本地历史对比验证",
+  "name": "agent-trace-workbench",
+  "version": "0.1.0",
+  "description": "Local-first observability and replay debugger for coding agents",
+  "license": "MIT",
+  "keywords": ["coding-agent", "observability", "replay", "claude-code", "codex-cli"],
+  "engines": { "node": ">=20" },
   "scripts": {
+    "start": "node workbench/server.js",
     "setup": "node setup-https-proxy.js",
     "proxy": "node forward-proxy.js",
-    "verify": "node verify.js",
-    "workbench": "node workbench/server.js"
+    "diagnostics": "node workbench/server.js",
+    "workbench": "node workbench/server.js",
+    "test": "node --test",
+    "check": "node --check forward-proxy.js && node --check workbench/server.js && node --check workbench/server/app.js && node --check workbench/server/gateway.js && node --check workbench/server/terminal.js && node --check workbench/public/app.js && node --test"
   },
   "dependencies": {
     "adm-zip": "^0.5.18",
     "node-pty": "^1.1.0",
-    "ws": "^8.21.0"
+    "ws": "^8.21.0",
+    "xterm": "^5.3.0",
+    "xterm-addon-fit": "^0.8.0",
+    "xterm-addon-webgl": "^0.16.0"
   }
 }

@@ -1,6 +1,12 @@
 /node_modules/
 /sessions/
 /certs/
+/local-private/
+/local-data/
 .idea/
 *.log
 *.tgz
+gateway-capture.jsonl
+events.jsonl
+agent-history.jsonl
+diagnostics-result.json

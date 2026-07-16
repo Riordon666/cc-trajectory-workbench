@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "distribution_status": "public-redistribution-authorized",
+  "authorization_basis": "Repository owner confirmation on 2026-07-15",
+  "notes": "The repository owner confirms these assets may be publicly redistributed with Agent Trace Workbench. Assets are not covered by the project's MIT software license unless individually stated. Source hints are filename-derived and retained for transparency.",
+  "assets": [
+    { "file": "__eimi_kasumi_hare_yukari_and_momiji_blue_archive__87ee7f1215c195f9b9d3b29fb27d82e4.jpg", "source_hint": "filename only", "license": "unknown" },
+    { "file": "《碧蓝档案》霞泽美游4k电脑桌面壁纸_花猫壁纸(en.huamaobizhi.com).jpg", "source_hint": "en.huamaobizhi.com", "license": "unknown" },
+    { "file": "《东方Project》博丽灵梦微笑樱花4k桌面壁纸_花猫壁纸(huamaobizhi.com).jpg", "source_hint": "huamaobizhi.com", "license": "unknown" },
+    { "file": "《孤独摇滚！》后藤一里脸部眼镜特写2k电脑桌面壁纸_花猫壁纸(en.huamaobizhi.com).png", "source_hint": "en.huamaobizhi.com", "license": "unknown" },
+    { "file": "《亲爱的弗兰克斯》莓8k电脑桌面壁纸_花猫壁纸(en.huamaobizhi.com).png", "source_hint": "en.huamaobizhi.com", "license": "unknown" },
+    { "file": "《无职转生》艾莉丝·格雷拉特4k电脑桌面壁纸_花猫壁纸(en.huamaobizhi.com).jpg", "source_hint": "en.huamaobizhi.com", "license": "unknown" },
+    { "file": "【哲风壁纸】动漫-动漫壁纸.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】动漫-原神.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】可爱-美少女-美腿.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】中二病-小鸟游六花.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】AI-AI壁纸.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】AI-AI少女-少女.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】AI壁纸-动漫人物.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "【哲风壁纸】SNAFFUR-动漫少女.png", "source_hint": "filename only", "license": "unknown" },
+    { "file": "3rdcountdown-1.png", "source_hint": "unknown", "license": "unknown", "usage": "UI decoration" },
+    { "file": "动漫女孩2k桌面壁纸_花猫壁纸(en.huamaobizhi.com).jpg", "source_hint": "en.huamaobizhi.com", "license": "unknown" },
+    { "file": "国服一周年贺图.jpg", "source_hint": "filename only", "license": "unknown" },
+    { "file": "刻晴 可爱剪刀手势 报纸墙 4K动漫壁纸_彼岸图网.jpg", "source_hint": "彼岸图网", "license": "unknown" },
+    { "file": "玉子 墙纸 4k壁纸 3840_2160.jpg", "source_hint": "filename only", "license": "unknown" },
+    { "file": "原神 芙宁娜 唯美 4K壁纸3840x2160-墨鱼部落格.jpg", "source_hint": "墨鱼部落格", "license": "unknown" },
+    { "file": "DoremsangD-5.png", "source_hint": "unknown", "license": "unknown", "usage": "character portrait" },
+    { "file": "DoremsangD-7.png", "source_hint": "unknown", "license": "unknown", "usage": "character portrait" }
+  ]
+}
