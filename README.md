@@ -754,7 +754,7 @@ git diff --check
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=Riordon666/agent-trace-workbench&type=Date)](https://star-history.com/#Riordon666/agent-trace-workbench&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=Riordon666/agent-trace-workbench&type=Date)](https://www.star-history.com/?repos=Riordon666%2Fagent-trace-workbench&type=date&legend=top-left)
 
 
 ## 许可证与壁纸
